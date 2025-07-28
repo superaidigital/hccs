@@ -53,7 +53,7 @@ function getUserPermissions($conn, $user_id, $role) {
 
     switch($role) {
         case 'Admin':
-            $permissions['allowed_pages'] = ['dashboard', 'shelters', 'users', 'settings'];
+            $permissions['allowed_pages'] = ['dashboard', 'shelters', 'users', 'settings', 'reports'];
             $permissions['can_manage_all'] = true;
             break;
 

@@ -629,7 +629,8 @@ if (isset($_GET['api'])) {
                 <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
                     <div>
                         <label class="block text-sm font-medium text-gray-700" id="totalPatientsLabel">จำนวนที่เปลี่ยนแปลง</label>
-                        <input type="number" name="total_patients" id="totalPatients" min="0" value="0" class="mt-1 block w-full px-2 py-1.5 text-sm border border-gray-300 rounded-md" required>
+                        <!-- UPDATED: Added readonly and bg-gray-100 -->
+                        <input type="number" name="total_patients" id="totalPatients" min="0" value="0" class="mt-1 block w-full px-2 py-1.5 text-sm border border-gray-300 rounded-md bg-gray-100" readonly required>
                     </div>
                     <div>
                         <label class="block text-sm font-medium text-gray-700">ชาย</label>
@@ -1111,53 +1112,38 @@ document.addEventListener('DOMContentLoaded', () => {
         updateAmountModal.classList.remove('hidden');
     }
 
+    function setupFormCalculation(form) {
+        const maleInput = form.querySelector('#malePatients');
+        const femaleInput = form.querySelector('#femalePatients');
+        const totalInput = form.querySelector('#totalPatients');
+
+        const calculateTotal = () => {
+            const male = parseInt(maleInput.value) || 0;
+            const female = parseInt(femaleInput.value) || 0;
+            totalInput.value = male + female;
+        };
+
+        maleInput.addEventListener('input', calculateTotal);
+        femaleInput.addEventListener('input', calculateTotal);
+    }
+
     async function openHospitalReportModal(shelter) {
-        document.getElementById('hospitalShelterId').value = shelter.id;
-        document.getElementById('hospitalReportDate').value = new Date().toISOString().split('T')[0];
-        
-        // ปรับ title และ labels ตามประเภทศูนย์
-        const isHospital = shelter.type === 'รพ.สต.';
-        const modalTitle = isHospital ? 
-            `เพิ่ม/ลดจำนวนผู้ป่วย - ${shelter.name}` : 
-            `เพิ่ม/ลดจำนวนผู้เข้าพัก - ${shelter.name}`;
-        document.getElementById('hospitalReportModalTitle').textContent = modalTitle;
-        
-        // ปรับ label ตามประเภทศูนย์
-        const totalLabel = 'จำนวนที่เปลี่ยนแปลง';
-        document.getElementById('totalPatientsLabel').textContent = totalLabel;
-        
-        // รีเซ็ตฟอร์มให้ทุกช่องเป็น 0 และเลือก "เพิ่มยอด" เป็นค่าเริ่มต้น
         hospitalReportForm.reset();
         document.getElementById('hospitalShelterId').value = shelter.id;
         document.getElementById('hospitalReportDate').value = new Date().toISOString().split('T')[0];
         
-        // ตั้งค่า radio button เป็นเพิ่มยอด
+        const isHospital = shelter.type === 'รพ.สต.';
+        document.getElementById('hospitalReportModalTitle').textContent = isHospital 
+            ? `เพิ่ม/ลดจำนวนผู้ป่วย - ${shelter.name}` 
+            : `เพิ่ม/ลดจำนวนผู้เข้าพัก - ${shelter.name}`;
+        
         document.querySelector('input[name="operation_type"][value="add"]').checked = true;
         
         hospitalReportModal.classList.remove('hidden');
         hospitalReportModal.classList.add('flex');
-
-        // Add auto-calculation listeners
-        const maleInput = document.getElementById('malePatients');
-        const femaleInput = document.getElementById('femalePatients');
-        const totalInput = document.getElementById('totalPatients');
-
-        function updateTotalFromGender() {
-            const male = parseInt(maleInput.value) || 0;
-            const female = parseInt(femaleInput.value) || 0;
-            const sum = male + female;
-            if (sum > 0) {
-                totalInput.value = sum;
-            }
-        }
-
-        // Remove existing listeners to prevent duplicates
-        maleInput.removeEventListener('input', updateTotalFromGender);
-        femaleInput.removeEventListener('input', updateTotalFromGender);
         
-        // Add new listeners
-        maleInput.addEventListener('input', updateTotalFromGender);
-        femaleInput.addEventListener('input', updateTotalFromGender);
+        // Setup automatic calculation for this modal instance
+        setupFormCalculation(hospitalReportForm);
     }
     
     // Function to open history modal
@@ -1571,54 +1557,41 @@ document.addEventListener('DOMContentLoaded', () => {
         e.preventDefault();
         const formData = new FormData(e.target);
         
-        // Basic validation
         const totalPatients = parseInt(formData.get('total_patients')) || 0;
-        const malePatients = parseInt(formData.get('male_patients')) || 0;
         const femalePatients = parseInt(formData.get('female_patients')) || 0;
-        
-        // Optional validation: warn if male + female doesn't equal total
-        if (malePatients + femalePatients > 0 && malePatients + femalePatients !== totalPatients) {
-            const confirmResult = await Swal.fire({
-                title: 'ตรวจสอบข้อมูล',
-                text: `จำนวนชาย (${malePatients}) + หญิง (${femalePatients}) = ${malePatients + femalePatients} ไม่เท่ากับจำนวนรวม (${totalPatients}) ต้องการบันทึกต่อไปหรือไม่?`,
-                icon: 'question',
-                showCancelButton: true,
-                confirmButtonColor: '#2563EB',
-                cancelButtonColor: '#6B7280',
-                confirmButtonText: 'บันทึกต่อไป',
-                cancelButtonText: 'แก้ไข'
-            });
-            
-            if (!confirmResult.isConfirmed) {
-                return;
-            }
+        const pregnantWomen = parseInt(formData.get('pregnant_women')) || 0;
+
+        // Validation 1: Pregnant women check
+        if (pregnantWomen > femalePatients) {
+            showAlert('error', 'ข้อมูลไม่ถูกต้อง', 'จำนวนหญิงตั้งครรภ์ต้องไม่เกินจำนวนผู้ป่วยหญิงทั้งหมด');
+            return;
         }
-        
+
+        // Validation 2: Sub-groups total check
+        const subGroups = [
+            'disabled_patients', 'bedridden_patients', 'elderly_patients', 'child_patients',
+            'chronic_disease_patients', 'diabetes_patients', 'hypertension_patients',
+            'heart_disease_patients', 'mental_health_patients', 'kidney_disease_patients',
+            'other_monitored_diseases'
+        ];
+        const subGroupsTotal = subGroups.reduce((sum, key) => sum + (parseInt(formData.get(key)) || 0), 0);
+
+        if (subGroupsTotal > totalPatients) {
+            showAlert('error', 'ข้อมูลไม่ถูกต้อง', `ยอดรวมในกลุ่มย่อย (${subGroupsTotal}) ต้องไม่เกินจำนวนผู้ป่วยทั้งหมด (${totalPatients})`);
+            return;
+        }
+
         try {
-            // Debug: log form data
-            console.log('Submitting form data:', Object.fromEntries(formData.entries()));
-            
             const response = await fetch(`${API_URL}?api=save_hospital_report`, {
                 method: 'POST',
                 body: formData
             });
-            
-            const responseText = await response.text();
-            console.log('Raw response:', responseText);
-            
-            let result;
-            try {
-                result = JSON.parse(responseText);
-            } catch (parseError) {
-                console.error('JSON parse error:', parseError, 'Raw response:', responseText);
-                showAlert('error', 'เกิดข้อผิดพลาด', 'การตอบกลับจากเซิร์ฟเวอร์ไม่ถูกต้อง');
-                return;
-            }
+            const result = await response.json();
             
             if (result.status === 'success') {
                 hospitalReportModal.classList.add('hidden');
                 showAlert('success', result.message);
-                mainFetch(); // รีเฟรชข้อมูล shelters
+                mainFetch(); // Refresh shelter data
             } else {
                 showAlert('error', 'เกิดข้อผิดพลาด', result.message);
             }

@@ -13,11 +13,16 @@ $navItems = [
         'icon' => 'home',
         'roles' => ['Admin', 'Coordinator', 'HealthStaff', 'User'], 
     ],
+    'reports' => [ // <-- เพิ่มส่วนนี้เข้าไป
+        'label' => 'รายงาน',
+        'icon' => 'bar-chart-2',
+        'roles' => ['Admin'], 
+    ],
     'shelters' => [
         'label' => 'จัดการข้อมูลศูนย์',
         'icon' => 'building', // ไอคอนตรงกับเมนูหลัก
         'roles' => ['Admin', 'Coordinator', 'HealthStaff'],
-    ],
+    ], 
     'users' => [
         'label' => 'จัดการผู้ใช้งาน',
         'icon' => 'users',
