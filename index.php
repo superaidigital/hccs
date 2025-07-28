@@ -31,7 +31,7 @@ try {
     }
 
     // ดึงการตั้งค่าระบบ
-    $settings_sql = "SELECT setting_key, setting_value FROM settings"; // แก้ไขตรงนี้
+    $settings_sql = "SELECT setting_key, setting_value FROM settings";
     $settings_result = $conn->prepare($settings_sql);
     if (!$settings_result || !$settings_result->execute()) {
         throw new Exception("ไม่สามารถดึงการตั้งค่าระบบได้");
@@ -44,11 +44,11 @@ try {
     }
 
     // ตรวจสอบสถานะระบบ
-    if ($settings['system_status'] != '1' && $_SESSION['role'] !== 'Admin') {
-        $page = 'disabled';
+    if (($settings['system_status'] ?? '1') != '1' && $_SESSION['role'] !== 'Admin') {
+        $page = 'system_disabled';
     } else {
-        // ดึงและตรวจสอบสิทธิ์การใช้งาน
-        $permissions = getUserPermissions($conn, $_SESSION['id'], $_SESSION['role']);
+        // ดึงและตรวจสอบสิทธิ์การใช้งาน (FIX: Changed $_SESSION['id'] to $_SESSION['user_id'])
+        $permissions = getUserPermissions($conn, $_SESSION['user_id'], $_SESSION['role']);
         if (!$permissions) {
             throw new Exception("ไม่สามารถดึงข้อมูลสิทธิ์การใช้งานได้");
         }
@@ -69,7 +69,7 @@ try {
     // แสดงผลหน้าเว็บ
     include 'partials/header.php';
 
-    if ($page === 'disabled') {
+    if ($page === 'system_disabled') {
         require_once 'pages/system_disabled.php';
     } else {
         require_once "pages/{$page}.php";
@@ -83,4 +83,4 @@ try {
     require_once 'pages/error.php';
     include 'partials/footer.php';
 }
-?><i class="fa fa-home"></i> <!-- Font Awesome -->
+?>

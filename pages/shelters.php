@@ -21,22 +21,67 @@ if (isset($_GET['api'])) {
     $data = json_decode(file_get_contents('php://input'), true);
     switch ($_GET['api']) {
         case 'get_shelters':
-            $sql = "SELECT * FROM shelters ORDER BY name ASC";
-            if ($_SESSION['role'] === 'Coordinator' && isset($_SESSION['assigned_shelter_id'])) {
-                $assigned_id = intval($_SESSION['assigned_shelter_id']);
-                $sql = "SELECT * FROM shelters WHERE id = $assigned_id";
+            $result = null;
+
+            // Explicitly handle Admin role first to ensure they get all data
+            if ($_SESSION['role'] === 'Admin') {
+                $sql = "SELECT * FROM shelters ORDER BY name ASC";
+                $result = $conn->query($sql);
             }
-            $result = $conn->query($sql);
+            // Handle Coordinator
+            elseif ($_SESSION['role'] === 'Coordinator' && isset($_SESSION['assigned_shelter_id'])) {
+                $assigned_id = intval($_SESSION['assigned_shelter_id']);
+                $stmt = $conn->prepare("SELECT * FROM shelters WHERE id = ?");
+                $stmt->bind_param("i", $assigned_id);
+                $stmt->execute();
+                $result = $stmt->get_result();
+                $stmt->close();
+            }
+            // Handle HealthStaff
+            elseif ($_SESSION['role'] === 'HealthStaff') {
+                $allowed_shelters = $_SESSION['permissions']['allowed_shelters'] ?? [];
+
+                if (!empty($allowed_shelters)) {
+                    $allowed_ids = array_map('intval', $allowed_shelters);
+                    $id_list = implode(',', $allowed_ids);
+                    $sql = "SELECT * FROM shelters WHERE id IN ($id_list) ORDER BY name ASC";
+                    $result = $conn->query($sql);
+                }
+                // If HealthStaff has no assigned shelters, $result remains null
+                // The logic below will correctly return an empty array.
+            }
+            // Fallback for other roles like 'User'
+            else {
+                $sql = "SELECT * FROM shelters ORDER BY name ASC";
+                $result = $conn->query($sql);
+            }
+
             $shelters = [];
-            while($row = $result->fetch_assoc()) {
-                $shelters[] = $row;
+            // This check handles all cases, including if a query fails ($result is null)
+            if ($result && $result->num_rows > 0) {
+                while($row = $result->fetch_assoc()) {
+                    $shelters[] = $row;
+                }
             }
             echo json_encode(['status' => 'success', 'data' => $shelters]);
             break;
+            
         case 'add_shelter':
             if ($_SESSION['role'] !== 'Admin') {
                 echo json_encode(['status' => 'error', 'message' => 'ไม่มีสิทธิ์ดำเนินการ']); exit();
             }
+            // Check for duplicate shelter name
+            $check_stmt = $conn->prepare("SELECT id FROM shelters WHERE name = ?");
+            $check_stmt->bind_param("s", $data['name']);
+            $check_stmt->execute();
+            $check_result = $check_stmt->get_result();
+            if ($check_result->num_rows > 0) {
+                echo json_encode(['status' => 'error', 'message' => 'ชื่อศูนย์นี้มีอยู่ในระบบแล้ว']);
+                $check_stmt->close();
+                exit();
+            }
+            $check_stmt->close();
+
             $stmt = $conn->prepare("INSERT INTO shelters (name, type, capacity, coordinator, phone, amphoe, tambon, latitude, longitude) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)");
             $capacity = isset($data['capacity']) && $data['capacity'] !== '' ? intval($data['capacity']) : 0;
             $stmt->bind_param("ssissssss", $data['name'], $data['type'], $capacity, $data['coordinator'], $data['phone'], $data['amphoe'], $data['tambon'], $data['latitude'], $data['longitude']);
@@ -52,7 +97,7 @@ if (isset($_GET['api'])) {
             if ($_SESSION['role'] === 'Coordinator' && $shelter_id_to_edit !== intval($_SESSION['assigned_shelter_id'])) {
                  echo json_encode(['status' => 'error', 'message' => 'ไม่มีสิทธิ์แก้ไขศูนย์นี้']); exit();
             }
-             $stmt = $conn->prepare("UPDATE shelters SET name=?, type=?, capacity=?, coordinator=?, phone=?, amphoe=?, tambon=?, latitude=?, longitude=? WHERE id=?");
+             $stmt = $conn->prepare("UPDATE shelters SET name=?, type=?, capacity=?, coordinator=?, phone=?, amphoe, tambon, latitude, longitude=? WHERE id=?");
              $capacity = isset($data['capacity']) && $data['capacity'] !== '' ? intval($data['capacity']) : 0;
              $stmt->bind_param("ssissssssi", $data['name'], $data['type'], $capacity, $data['coordinator'], $data['phone'], $data['amphoe'], $data['tambon'], $data['latitude'], $data['longitude'], $data['id']);
              if ($stmt->execute()) {
@@ -101,6 +146,145 @@ if (isset($_GET['api'])) {
             } catch (Exception $e) {
                 $conn->rollback();
                 echo json_encode(['status' => 'error', 'message' => 'Transaction failed: ' . $e->getMessage()]);
+            }
+            break;
+        case 'import_shelters':
+            if ($_SESSION['role'] !== 'Admin') {
+                echo json_encode(['status' => 'error', 'message' => 'ไม่มีสิทธิ์ดำเนินการ']);
+                exit();
+            }
+        
+            if (!isset($_FILES['csvFile']) || $_FILES['csvFile']['error'] !== UPLOAD_ERR_OK) {
+                echo json_encode(['status' => 'error', 'message' => 'ไม่พบไฟล์ที่อัปโหลดหรือเกิดข้อผิดพลาด']);
+                exit();
+            }
+        
+            $file_path = $_FILES['csvFile']['tmp_name'];
+            $file_mime = mime_content_type($file_path);
+        
+            if ($file_mime !== 'text/plain' && $file_mime !== 'text/csv') {
+                echo json_encode(['status' => 'error', 'message' => 'รูปแบบไฟล์ไม่ถูกต้อง ต้องเป็น .csv เท่านั้น']);
+                exit();
+            }
+            
+            $file_handle = fopen($file_path, 'r');
+            if (!$file_handle) {
+                echo json_encode(['status' => 'error', 'message' => 'ไม่สามารถเปิดไฟล์ CSV ได้']);
+                exit();
+            }
+            
+            // Trim BOM if present
+            fseek($file_handle, 0);
+            if (fread($file_handle, 3) !== "\xef\xbb\xbf") {
+                rewind($file_handle);
+            }
+        
+            $header = fgetcsv($file_handle);
+            if (!$header) {
+                echo json_encode(['status' => 'error', 'message' => 'ไฟล์ CSV ว่างเปล่าหรือไม่สามารถอ่าน Header ได้']);
+                fclose($file_handle);
+                exit();
+            }
+            $header = array_map('trim', $header);
+            
+            $required_headers = ['name', 'type'];
+            foreach($required_headers as $rh) {
+                if (!in_array($rh, $header)) {
+                     echo json_encode(['status' => 'error', 'message' => "ไม่พบคอลัมน์ที่จำเป็น: " . $rh]);
+                     fclose($file_handle);
+                     exit();
+                }
+            }
+        
+            $conn->begin_transaction();
+            $inserted_count = 0;
+            $updated_count = 0;
+            $error_count = 0;
+            $skipped_count = 0;
+        
+            try {
+                $insert_stmt = $conn->prepare("INSERT INTO shelters (name, type, capacity, coordinator, phone, amphoe, tambon, latitude, longitude) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)");
+                $update_stmt = $conn->prepare("UPDATE shelters SET name=?, type=?, capacity=?, coordinator=?, phone=?, amphoe=?, tambon=?, latitude=?, longitude=? WHERE id=?");
+                $check_stmt = $conn->prepare("SELECT id FROM shelters WHERE name = ?");
+
+                while (($row = fgetcsv($file_handle)) !== false) {
+                    // Handle empty lines in CSV
+                    if (count($row) === 1 && is_null($row[0])) {
+                        continue;
+                    }
+
+                    $row_count = count($row);
+                    $header_count = count($header);
+
+                    if ($row_count < $header_count) {
+                       $row = array_pad($row, $header_count, null);
+                    } elseif ($row_count > $header_count) {
+                       $row = array_slice($row, 0, $header_count);
+                    }
+                    
+                    $data = array_combine($header, $row);
+        
+                    $name = trim($data['name'] ?? '');
+                    $type = trim($data['type'] ?? '');
+                    if (empty($name) || empty($type)) {
+                        $error_count++;
+                        continue;
+                    }
+        
+                    $capacity = !empty($data['capacity']) ? intval($data['capacity']) : 0;
+                    $coordinator = trim($data['coordinator'] ?? null);
+                    $phone = trim($data['phone'] ?? null);
+                    $amphoe = trim($data['amphoe'] ?? null);
+                    $tambon = trim($data['tambon'] ?? null);
+                    $latitude = trim($data['latitude'] ?? null);
+                    $longitude = trim($data['longitude'] ?? null);
+                    $id = !empty($data['id']) ? intval($data['id']) : null;
+        
+                    if ($id) {
+                        $update_stmt->bind_param("ssissssssi", $name, $type, $capacity, $coordinator, $phone, $amphoe, $tambon, $latitude, $longitude, $id);
+                        $update_stmt->execute();
+                        if ($update_stmt->affected_rows > 0) {
+                            $updated_count++;
+                        }
+                    } else {
+                        // Check for duplicate name before inserting
+                        $check_stmt->bind_param("s", $name);
+                        $check_stmt->execute();
+                        $check_result = $check_stmt->get_result();
+                        if ($check_result->num_rows > 0) {
+                            $skipped_count++;
+                            continue;
+                        }
+
+                        $insert_stmt->bind_param("ssissssss", $name, $type, $capacity, $coordinator, $phone, $amphoe, $tambon, $latitude, $longitude);
+                        if ($insert_stmt->execute()) {
+                            $inserted_count++;
+                        } else {
+                            $error_count++;
+                        }
+                    }
+                }
+                
+                $conn->commit();
+                $insert_stmt->close();
+                $update_stmt->close();
+                $check_stmt->close();
+                fclose($file_handle);
+                
+                $message = "นำเข้าสำเร็จ! เพิ่มข้อมูลใหม่ {$inserted_count} รายการ, อัปเดต {$updated_count} รายการ";
+                if ($skipped_count > 0) {
+                    $message .= ", ข้ามข้อมูลซ้ำ {$skipped_count} รายการ";
+                }
+                if ($error_count > 0) {
+                    $message .= ", ข้อมูลไม่สมบูรณ์ {$error_count} รายการ";
+                }
+        
+                echo json_encode(['status' => 'success', 'message' => $message]);
+        
+            } catch (Exception $e) {
+                $conn->rollback();
+                fclose($file_handle);
+                echo json_encode(['status' => 'error', 'message' => 'เกิดข้อผิดพลาดระหว่างการนำเข้าข้อมูล: ' . $e->getMessage()]);
             }
             break;
         case 'get_hospital_report':
@@ -460,6 +644,7 @@ if (isset($_GET['api'])) {
                     <option>ศูนย์รับบริจาค</option>
                     <option>รพ.สต.</option>
                     <option>โรงพยาบาล</option>
+                    <option>โรงครัวพระราชทาน</option>
                 </select>
             </div>
             <div>
@@ -480,6 +665,7 @@ if (isset($_GET['api'])) {
                     <button id="viewListBtn" class="p-2 rounded-md text-gray-500" title="มุมมองตาราง"><i data-lucide="list" class="h-5 w-5 pointer-events-none"></i></button>
                 </div>
                  <button id="resetFilterBtn" class="p-2.5 bg-gray-100 rounded-lg text-gray-600 hover:bg-gray-200" title="ล้างค่า"><i data-lucide="rotate-cw" class="h-5 w-5"></i></button>
+                 <button id="importCsvBtn" class="p-2.5 bg-gray-100 rounded-lg text-gray-600 hover:bg-gray-200" title="นำเข้าข้อมูลจาก CSV"><i data-lucide="file-up" class="h-5 w-5"></i></button>
                  <button id="exportCsvBtn" class="p-2.5 bg-gray-100 rounded-lg text-gray-600 hover:bg-gray-200" title="บันทึกเป็น CSV"><i data-lucide="file-down" class="h-5 w-5"></i></button>
                  <button id="addShelterBtn" class="p-2.5 bg-blue-600 text-white rounded-lg hover:bg-blue-700" title="เพิ่มศูนย์ใหม่"><i data-lucide="plus" class="h-5 w-5"></i></button>
             </div>
@@ -506,7 +692,11 @@ if (isset($_GET['api'])) {
                     <div>
                         <label for="type" class="block text-sm font-medium text-gray-700">ประเภทสถานที่</label>
                         <select id="type" name="type" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-lg">
-                           <option>ศูนย์พักพิง</option><option>ศูนย์รับบริจาค</option><option>รพ.สต.</option><option>โรงพยาบาล</option>
+                           <option>ศูนย์พักพิง</option>
+                           <option>ศูนย์รับบริจาค</option>
+                           <option>รพ.สต.</option>
+                           <option>โรงพยาบาล</option>
+                           <option>โรงครัวพระราชทาน</option>
                         </select>
                     </div>
                     <div>
@@ -546,6 +736,40 @@ if (isset($_GET['api'])) {
         </form>
     </div>
 </div>
+
+<!-- CSV Import Modal -->
+<div id="importModal" class="fixed inset-0 bg-black bg-opacity-60 overflow-y-auto h-full w-full justify-center items-center z-50 hidden">
+    <div class="relative mx-auto p-8 border w-full max-w-lg shadow-lg rounded-2xl bg-white">
+        <button id="closeImportModal" class="absolute top-4 right-4 text-gray-400 hover:text-gray-600"><i data-lucide="x" class="h-6 w-6"></i></button>
+        <h3 id="importModalTitle" class="text-2xl leading-6 font-bold text-gray-900 mb-6">นำเข้าข้อมูลศูนย์จากไฟล์ CSV</h3>
+        <form id="importForm">
+            <div class="space-y-4">
+                <div>
+                    <label for="csvFile" class="block text-sm font-medium text-gray-700">เลือกไฟล์ .csv</label>
+                    <input type="file" id="csvFile" name="csvFile" accept=".csv" class="mt-1 block w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100" required>
+                </div>
+                <div class="bg-gray-50 p-4 rounded-lg text-sm text-gray-600">
+                    <p class="font-semibold mb-2">คำแนะนำ:</p>
+                    <ul class="list-disc list-inside space-y-1">
+                        <li>ไฟล์ต้องเป็น UTF-8 encoded CSV</li>
+                        <li>Header ที่ต้องมี: `name`, `type`, `capacity`, `coordinator`, `phone`, `amphoe`, `tambon`, `latitude`, `longitude`</li>
+                        <li>คอลัมน์ `name` และ `type` จำเป็นต้องมีข้อมูล</li>
+                        <li>หากต้องการอัปเดตข้อมูลเดิม ให้เพิ่มคอลัมน์ `id` เข้ามาด้วย</li>
+                    </ul>
+                     <button type="button" id="downloadTemplateBtn" class="mt-3 inline-flex items-center gap-2 px-3 py-1.5 text-sm text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50">
+                        <i data-lucide="download" class="h-4 w-4"></i>
+                        <span>ดาวน์โหลดเทมเพลต</span>
+                    </button>
+                </div>
+            </div>
+            <div class="mt-8 flex justify-end gap-3">
+                 <button type="button" id="cancelImportModal" class="px-6 py-2.5 bg-gray-200 rounded-lg hover:bg-gray-300">ยกเลิก</button>
+                 <button type="submit" class="px-6 py-2.5 bg-blue-600 text-white font-bold rounded-lg hover:bg-blue-700">นำเข้าข้อมูล</button>
+            </div>
+        </form>
+    </div>
+</div>
+
 <div id="updateAmountModal" class="fixed inset-0 overflow-y-auto h-full w-full justify-center items-center z-50 hidden">
     <div class="relative mx-auto p-8 border border-gray-200 w-full max-w-lg shadow-2xl rounded-2xl bg-white">
         <button id="closeUpdateAmountModal" class="absolute top-4 right-4 text-gray-400 hover:text-gray-600"><i data-lucide="x" class="h-6 w-6"></i></button>
@@ -932,18 +1156,10 @@ if (isset($_GET['api'])) {
 <script src="//cdn.jsdelivr.net/npm/sweetalert2@11"></script>
 <script>
 document.addEventListener('DOMContentLoaded', () => {
+    // Universal variables
     let allShelters = [];
     let currentView = 'grid'; 
     const dataContainer = document.getElementById('dataDisplayContainer');
-    const searchInput = document.getElementById('searchInput');
-    const typeFilter = document.getElementById('typeFilter');
-    const amphoeFilter = document.getElementById('amphoeFilter');
-    const tambonFilter = document.getElementById('tambonFilter');
-    const viewGridBtn = document.getElementById('viewGridBtn');
-    const viewListBtn = document.getElementById('viewListBtn');
-    const addShelterBtn = document.getElementById('addShelterBtn');
-    const resetFilterBtn = document.getElementById('resetFilterBtn');
-    const exportCsvBtn = document.getElementById('exportCsvBtn');
     const shelterModal = document.getElementById('shelterModal');
     const shelterForm = document.getElementById('shelterForm');
     const shelterModalTitle = document.getElementById('shelterModalTitle');
@@ -969,18 +1185,24 @@ document.addEventListener('DOMContentLoaded', () => {
         'ศูนย์พักพิง':    { icon: 'home',         color: 'blue' },
         'ศูนย์รับบริจาค': { icon: 'package',      color: 'purple' },
         'รพ.สต.':         { icon: 'heart',        color: 'teal' },
-        'โรงพยาบาล':     { icon: 'cross',        color: 'pink' }
+        'โรงพยาบาล':     { icon: 'cross',        color: 'pink' },
+        'โรงครัวพระราชทาน': { icon: 'utensils-crossed', color: 'orange' }
     };
     const showAlert = (icon, title, text = '') => Swal.fire({ icon, title, text, confirmButtonColor: '#2563EB' });
+    
+    // --- Functions ---
     function populateAmphoeDropdowns() {
-        if(amphoeFilter) amphoeFilter.innerHTML = '<option value="">ทุกอำเภอ</option>';
+        const amphoeFilter = document.getElementById('amphoeFilter');
+        if (amphoeFilter) {
+            amphoeFilter.innerHTML = '<option value="">ทุกอำเภอ</option>';
+            amphoes.forEach(amphoe => amphoeFilter.add(new Option(amphoe, amphoe)));
+        }
         modalAmphoe.innerHTML = '<option value="">-- เลือกอำเภอ --</option>';
-        amphoes.forEach(amphoe => {
-            if(amphoeFilter) amphoeFilter.add(new Option(amphoe, amphoe));
-            modalAmphoe.add(new Option(amphoe, amphoe));
-        });
+        amphoes.forEach(amphoe => modalAmphoe.add(new Option(amphoe, amphoe)));
     }
+
     function populateTambonDropdown(amphoeName, selectElement) {
+        if (!selectElement) return;
         selectElement.innerHTML = '';
         selectElement.disabled = true;
         const defaultOption = selectElement.id === 'tambonFilter' ? 'ทุกตำบล' : '-- เลือกตำบล --';
@@ -990,9 +1212,14 @@ document.addEventListener('DOMContentLoaded', () => {
             sisaketData[amphoeName].forEach(tambon => selectElement.add(new Option(tambon, tambon)));
         }
     }
+
     function render() {
         let filteredShelters = allShelters;
-        if(searchInput) {
+        const searchInput = document.getElementById('searchInput'); // Element for Admin
+        if (searchInput) {
+            const typeFilter = document.getElementById('typeFilter');
+            const amphoeFilter = document.getElementById('amphoeFilter');
+            const tambonFilter = document.getElementById('tambonFilter');
             const filters = {
                 search: searchInput.value.toLowerCase(),
                 type: typeFilter.value,
@@ -1013,14 +1240,54 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         if (currentView === 'grid') { renderGridView(filteredShelters); } else { renderListView(filteredShelters); }
     }
+
+    // --- RENDER GRID VIEW ---
     function renderGridView(shelters) {
         const userRole = "<?= $_SESSION['role'] ?? 'User' ?>";
         dataContainer.innerHTML = shelters.map(s => {
             const style = TYPE_STYLES[s.type] || TYPE_STYLES['ศูนย์พักพิง'];
-            let buttons = `<button class="edit-btn text-gray-400 hover:text-blue-600" data-shelter='${JSON.stringify(s)}'><i class="h-5 w-5 pointer-events-none" data-lucide="file-pen-line"></i></button>`;
+            let adminButtons = '';
             if (userRole === 'Admin') {
-                buttons = `<button class="delete-btn text-gray-400 hover:text-red-600" data-id="${s.id}" data-name="${s.name}"><i class="h-5 w-5 pointer-events-none" data-lucide="trash-2"></i></button>` + buttons;
+                adminButtons = `<button class="edit-btn text-gray-400 hover:text-blue-600" data-shelter='${JSON.stringify(s)}' title="แก้ไขข้อมูล"><i class="h-5 w-5 pointer-events-none" data-lucide="file-pen-line"></i></button>
+                              <button class="delete-btn text-gray-400 hover:text-red-600" data-id="${s.id}" data-name="${s.name}" title="ลบศูนย์"><i class="h-5 w-5 pointer-events-none" data-lucide="trash-2"></i></button>`;
             }
+
+            let updateButtonHTML = (s.type === 'รพ.สต.' || s.type === 'ศูนย์พักพิง') 
+                ? `<button class="hospital-report-btn flex items-center px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 text-sm font-semibold" data-shelter='${JSON.stringify(s)}'><i data-lucide="plus" class="h-4 w-4 mr-2"></i>อัปเดต</button>`
+                : `<button class="update-amount-btn flex items-center px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 text-sm font-semibold" data-shelter='${JSON.stringify(s)}'><i data-lucide="plus" class="h-4 w-4 mr-2"></i>อัปเดต</button>`;
+
+            let manageDropdownHTML = (s.type === 'รพ.สต.' || s.type === 'ศูนย์พักพิง') 
+                ? `<div class="relative inline-block text-left">
+                        <button type="button" class="manage-data-dropdown-toggle inline-flex justify-center w-full rounded-md border border-gray-300 shadow-sm px-4 py-2 bg-white text-sm font-medium text-gray-700 hover:bg-gray-50">
+                            จัดการข้อมูล
+                            <i data-lucide="chevron-down" class="ml-2 -mr-1 h-5 w-5"></i>
+                        </button>
+                        <div class="manage-data-dropdown-menu hidden origin-top-right absolute right-0 mt-2 w-48 rounded-md shadow-lg bg-white ring-1 ring-black ring-opacity-5 z-10">
+                            <div class="py-1">
+                                <a href="#" class="view-current-details-btn text-gray-700 block px-4 py-2 text-sm hover:bg-gray-100" data-shelter='${JSON.stringify(s)}'>รายละเอียด</a>
+                                <a href="#" class="view-history-btn text-gray-700 block px-4 py-2 text-sm hover:bg-gray-100" data-shelter='${JSON.stringify(s)}'>ประวัติ</a>
+                            </div>
+                        </div>
+                   </div>`
+                : `<div class="relative inline-block text-left">
+                        <button type="button" class="manage-data-dropdown-toggle inline-flex justify-center w-full rounded-md border border-gray-300 shadow-sm px-4 py-2 bg-white text-sm font-medium text-gray-700 hover:bg-gray-50">
+                            จัดการข้อมูล
+                            <i data-lucide="chevron-down" class="ml-2 -mr-1 h-5 w-5"></i>
+                        </button>
+                        <div class="manage-data-dropdown-menu hidden origin-top-right absolute right-0 mt-2 w-48 rounded-md shadow-lg bg-white ring-1 ring-black ring-opacity-5 z-10">
+                            <div class="py-1">
+                                <a href="#" class="view-history-btn text-gray-700 block px-4 py-2 text-sm hover:bg-gray-100" data-shelter='${JSON.stringify(s)}'>ประวัติ</a>
+                            </div>
+                        </div>
+                   </div>`;
+
+            let phoneButtonHTML = s.phone 
+                ? `<a href="tel:${s.phone}" class="inline-flex items-center px-3 py-1 bg-green-100 text-green-800 rounded-full text-xs font-medium hover:bg-green-200">
+                     <i data-lucide="phone" class="h-3 w-3 mr-1.5"></i>
+                     ${s.phone}
+                   </a>`
+                : `<span>-</span>`;
+
             return `
             <div class="bg-white rounded-xl shadow-md p-5 flex flex-col hover:shadow-lg transition-shadow">
                 <div class="flex-grow">
@@ -1028,15 +1295,16 @@ document.addEventListener('DOMContentLoaded', () => {
                         <div class="flex items-center gap-4">
                             <div class="p-3 bg-${style.color}-100 rounded-lg"><i data-lucide="${style.icon}" class="h-6 w-6 text-${style.color}-600"></i></div>
                             <div>
-                                <h3 class="text-lg font-bold text-gray-800">${s.name}</h3><p class="text-sm text-gray-500">ต.${s.tambon}, อ.${s.amphoe}</p>
+                                <h3 class="text-lg font-bold text-gray-800">${s.name}</h3><p class="text-sm text-gray-500">ต.${s.tambon || '-'}, อ.${s.amphoe || '-'}</p>
                             </div>
                         </div>
                         <div class="flex items-center gap-2">
-                           ${buttons}
+                           ${adminButtons}
                         </div>
                     </div>
-                    <div class="border-t pt-4 mt-4 space-y-2">
-                        <p><span class="font-medium">ผู้ประสานงาน:</span> ${s.coordinator || '-'}</p><p><span class="font-medium">โทร:</span> ${s.phone || '-'}</p>
+                    <div class="border-t pt-4 mt-4 space-y-2 text-sm">
+                        <p><span class="font-medium text-gray-600">ผู้ประสานงาน:</span> ${s.coordinator || '-'}</p>
+                        <p class="flex items-center"><span class="font-medium text-gray-600 mr-2">โทร:</span> ${phoneButtonHTML}</p>
                     </div>
                 </div>
                 <div class="border-t mt-4 pt-4 flex justify-between items-center">
@@ -1045,36 +1313,71 @@ document.addEventListener('DOMContentLoaded', () => {
                         <p class="text-2xl font-bold">${s.current_occupancy || 0} <span class="text-base font-normal">${s.type === 'ศูนย์รับบริจาค' ? 'ชิ้น' : ('/ ' + (s.capacity || 0) + ' คน')}</span></p>
                     </div>
                     <div class="flex gap-2 flex-wrap">
-                        ${(s.type === 'รพ.สต.' || s.type === 'ศูนย์พักพิง') ? 
-                            '<button class="hospital-report-btn px-4 py-2 bg-gray-100 rounded-lg hover:bg-gray-200" data-shelter=\'' + JSON.stringify(s) + '\'>อัปเดต</button>' : 
-                            '<button class="update-amount-btn px-4 py-2 bg-gray-100 rounded-lg hover:bg-gray-200" data-shelter=\'' + JSON.stringify(s) + '\'>อัปเดต</button>'
-                        }
-                        ${(s.type === 'รพ.สต.' || s.type === 'ศูนย์พักพิง') ? 
-                            '<button class="view-current-details-btn px-4 py-2 bg-blue-100 rounded-lg hover:bg-blue-200 text-blue-700" data-shelter=\'' + JSON.stringify(s) + '\'>รายละเอียด</button>' : ''
-                        }
-                        <button class="view-history-btn px-4 py-2 bg-gray-100 rounded-lg hover:bg-gray-200" data-shelter='${JSON.stringify(s)}'>ประวัติ</button>
+                        ${updateButtonHTML}
+                        ${manageDropdownHTML}
                     </div>
                 </div>
             </div>
-        `;
+            `;
         }).join('');
         
-        // Initialize Lucide icons after creating HTML
         if (typeof lucide !== 'undefined') {
             setTimeout(() => lucide.createIcons(), 10);
         }
     }
+    
+    // --- RENDER LIST VIEW ---
     function renderListView(shelters) {
         dataContainer.classList.remove('grid', 'grid-cols-1', 'md:grid-cols-2', 'xl:grid-cols-3', 'gap-6');
         const userRole = "<?= $_SESSION['role'] ?? 'User' ?>";
-        let deleteBtnHtml = (s) => userRole === 'Admin' ? `<button class="delete-btn text-red-600 hover:text-red-900 ml-4" data-id="${s.id}" data-name="${s.name}">ลบ</button>` : '';
-        dataContainer.innerHTML = `<div class="overflow-x-auto bg-white rounded-xl shadow-md"><table class="min-w-full"><thead class="bg-gray-50"><tr><th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">ชื่อศูนย์</th><th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">ประเภท</th><th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">อำเภอ/ตำบล</th><th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">ยอดปัจจุบัน</th><th class="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase"></th></tr></thead><tbody class="divide-y divide-gray-200">${shelters.map(s => `<tr><td class="px-6 py-4 whitespace-nowrap">${s.name}</td><td class="px-6 py-4 whitespace-nowrap">${s.type}</td><td class="px-6 py-4 whitespace-nowrap">${s.amphoe} / ${s.tambon}</td><td class="px-6 py-4 whitespace-nowrap">${s.current_occupancy || 0}</td><td class="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">${(s.type === 'รพ.สต.' || s.type === 'ศูนย์พักพิง') ? '<button class="hospital-report-btn text-green-600 hover:text-green-900" data-shelter=\'' + JSON.stringify(s) + '\'>อัปเดต</button>' : '<button class="update-amount-btn text-green-600 hover:text-green-900" data-shelter=\'' + JSON.stringify(s) + '\'>อัปเดต</button>'}${(s.type === 'รพ.สต.' || s.type === 'ศูนย์พักพิง') ? '<button class="view-current-details-btn text-blue-600 hover:text-blue-900 ml-4" data-shelter=\'' + JSON.stringify(s) + '\'>รายละเอียด</button>' : ''}<button class="view-history-btn text-purple-600 hover:text-purple-900 ml-4" data-shelter='${JSON.stringify(s)}'>ประวัติ</button><button class="edit-btn text-blue-600 hover:text-blue-900 ml-4" data-shelter='${JSON.stringify(s)}'>แก้ไข</button>${deleteBtnHtml(s)}</td></tr>`).join('')}</tbody></table></div>`;
+        let adminActions = (s) => userRole === 'Admin' ? `<a href="#" class="edit-btn text-gray-700 block px-4 py-2 text-sm hover:bg-gray-100" data-shelter='${JSON.stringify(s)}'>แก้ไข</a><a href="#" class="delete-btn text-red-700 block px-4 py-2 text-sm hover:bg-gray-100" data-id="${s.id}" data-name="${s.name}">ลบ</a>` : '';
         
-        // Initialize Lucide icons after creating HTML
+        dataContainer.innerHTML = `<div class="overflow-x-auto bg-white rounded-xl shadow-md"><table class="min-w-full"><thead class="bg-gray-50"><tr><th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">ชื่อศูนย์</th><th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">ผู้ประสานงาน</th><th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">ยอดปัจจุบัน</th><th class="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase">จัดการ</th></tr></thead><tbody class="divide-y divide-gray-200">${shelters.map(s => {
+            let updateButtonHTML = (s.type === 'รพ.สต.' || s.type === 'ศูนย์พักพิง') 
+                ? `<button class="hospital-report-btn flex items-center text-green-600 hover:text-green-900" data-shelter='${JSON.stringify(s)}'><i data-lucide="plus" class="h-4 w-4 mr-1"></i>อัปเดต</button>`
+                : `<button class="update-amount-btn flex items-center text-green-600 hover:text-green-900" data-shelter='${JSON.stringify(s)}'><i data-lucide="plus" class="h-4 w-4 mr-1"></i>อัปเดต</button>`;
+            
+            let detailsLink = (s.type === 'รพ.สต.' || s.type === 'ศูนย์พักพิง')
+                ? `<a href="#" class="view-current-details-btn text-gray-700 block px-4 py-2 text-sm hover:bg-gray-100" data-shelter='${JSON.stringify(s)}'>รายละเอียด</a>` : '';
+            
+            let phoneButtonListHTML = s.phone
+                ? `<a href="tel:${s.phone}" class="inline-flex items-center px-2 py-0.5 bg-green-100 text-green-800 rounded-full text-xs font-medium hover:bg-green-200 ml-2">
+                    <i data-lucide="phone" class="h-3 w-3 mr-1"></i>
+                    โทร
+                  </a>`
+                : '';
+
+            return `<tr>
+                <td class="px-6 py-4 whitespace-nowrap"><div class="font-medium">${s.name}</div><div class="text-sm text-gray-500">${s.type} | ต.${s.tambon}, อ.${s.amphoe}</div></td>
+                <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500"><span>${s.coordinator || '-'}</span>${phoneButtonListHTML}</td>
+                <td class="px-6 py-4 whitespace-nowrap">${s.current_occupancy || 0}</td>
+                <td class="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
+                    <div class="flex items-center justify-end gap-4">
+                        ${updateButtonHTML}
+                        <div class="relative inline-block text-left">
+                            <button type="button" class="manage-data-dropdown-toggle inline-flex items-center text-gray-500 hover:text-gray-700">
+                                จัดการข้อมูล
+                                <i data-lucide="chevron-down" class="ml-1 h-4 w-4"></i>
+                            </button>
+                            <div class="manage-data-dropdown-menu hidden origin-top-right absolute right-0 mt-2 w-48 rounded-md shadow-lg bg-white ring-1 ring-black ring-opacity-5 z-10">
+                                <div class="py-1">
+                                    ${detailsLink}
+                                    <a href="#" class="view-history-btn text-gray-700 block px-4 py-2 text-sm hover:bg-gray-100" data-shelter='${JSON.stringify(s)}'>ประวัติ</a>
+                                    ${adminActions(s)}
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </td>
+            </tr>`;
+        }).join('')}</tbody></table></div>`;
+        
         if (typeof lucide !== 'undefined') {
             setTimeout(() => lucide.createIcons(), 10);
         }
     }
+    
+    // --- Main Fetch and Submit Functions ---
     async function mainFetch() {
         try {
             const response = await fetch(`${API_URL}?api=get_shelters`);
@@ -1094,6 +1397,8 @@ document.addEventListener('DOMContentLoaded', () => {
             } else { return { success: false, message: result.message }; }
         } catch (error) { console.error('Submit error:', error); return { success: false, message: 'การเชื่อมต่อล้มเหลว' }; }
     }
+
+    // --- Modal Functions (unchanged) ---
     function openUpdateModal(shelter) {
         updateAmountForm.reset();
         document.getElementById('updateShelterId').value = shelter.id;
@@ -1111,22 +1416,18 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         updateAmountModal.classList.remove('hidden');
     }
-
     function setupFormCalculation(form) {
         const maleInput = form.querySelector('#malePatients');
         const femaleInput = form.querySelector('#femalePatients');
         const totalInput = form.querySelector('#totalPatients');
-
         const calculateTotal = () => {
             const male = parseInt(maleInput.value) || 0;
             const female = parseInt(femaleInput.value) || 0;
             totalInput.value = male + female;
         };
-
         maleInput.addEventListener('input', calculateTotal);
         femaleInput.addEventListener('input', calculateTotal);
     }
-
     async function openHospitalReportModal(shelter) {
         hospitalReportForm.reset();
         document.getElementById('hospitalShelterId').value = shelter.id;
@@ -1142,39 +1443,27 @@ document.addEventListener('DOMContentLoaded', () => {
         hospitalReportModal.classList.remove('hidden');
         hospitalReportModal.classList.add('flex');
         
-        // Setup automatic calculation for this modal instance
         setupFormCalculation(hospitalReportForm);
     }
     
-    // Function to open history modal
+    // History & Details Modal Functions (unchanged)...
     async function openHistoryModal(shelter) {
         const historyModal = document.getElementById('historyModal');
         const historyShelterName = document.getElementById('historyShelterName');
-        const historyLoadingIndicator = document.getElementById('historyLoadingIndicator');
-        const historyTableBody = document.getElementById('historyTableBody');
-        const noHistoryMessage = document.getElementById('noHistoryMessage');
-        const historyPagination = document.getElementById('historyPagination');
         const historyPerPage = document.getElementById('historyPerPage');
         
-        // Store current shelter data
         window.currentHistoryShelter = shelter;
         window.currentHistoryPage = 1;
         
-        // Set shelter name
         historyShelterName.textContent = shelter.name;
         
-        // Show modal
         historyModal.classList.remove('hidden');
         historyModal.classList.add('flex');
         
-        // Load first page
         await loadHistoryPage(1, parseInt(historyPerPage.value));
         
-        // Add event listeners for pagination controls
         setupHistoryPaginationListeners();
     }
-    
-    // Function to load history page
     async function loadHistoryPage(page = 1, limit = 10) {
         const shelter = window.currentHistoryShelter;
         const historyLoadingIndicator = document.getElementById('historyLoadingIndicator');
@@ -1183,7 +1472,6 @@ document.addEventListener('DOMContentLoaded', () => {
         const historyPagination = document.getElementById('historyPagination');
         const historyPaginationInfo = document.getElementById('historyPaginationInfo');
         
-        // Show loading indicator
         historyLoadingIndicator.classList.remove('hidden');
         historyTableBody.innerHTML = '';
         noHistoryMessage.classList.add('hidden');
@@ -1199,10 +1487,8 @@ document.addEventListener('DOMContentLoaded', () => {
                 const logs = result.data.logs;
                 const pagination = result.data.pagination;
                 
-                // Update current page
                 window.currentHistoryPage = page;
                 
-                // Update pagination info
                 if (pagination.total_records > 0) {
                     historyPaginationInfo.textContent = `แสดง ${pagination.showing_from}-${pagination.showing_to} จาก ${pagination.total_records} รายการ`;
                 } else {
@@ -1212,7 +1498,6 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (logs.length === 0) {
                     noHistoryMessage.classList.remove('hidden');
                 } else {
-                    // Render table rows
                     historyTableBody.innerHTML = logs.map(log => {
                         const date = new Date(log.created_at);
                         const formattedDate = date.toLocaleDateString('th-TH') + ' ' + date.toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' });
@@ -1230,7 +1515,6 @@ document.addEventListener('DOMContentLoaded', () => {
                         `;
                     }).join('');
                     
-                    // Show and update pagination controls
                     if (pagination.total_pages > 1) {
                         updateHistoryPaginationControls(pagination);
                         historyPagination.classList.remove('hidden');
@@ -1247,8 +1531,6 @@ document.addEventListener('DOMContentLoaded', () => {
             showAlert('error', 'เกิดข้อผิดพลาด', 'ไม่สามารถดึงข้อมูลประวัติได้');
         }
     }
-    
-    // Function to update pagination controls
     function updateHistoryPaginationControls(pagination) {
         const historyShowingFrom = document.getElementById('historyShowingFrom');
         const historyShowingTo = document.getElementById('historyShowingTo');
@@ -1257,34 +1539,21 @@ document.addEventListener('DOMContentLoaded', () => {
         const historyPrevMobile = document.getElementById('historyPrevMobile');
         const historyNextMobile = document.getElementById('historyNextMobile');
         
-        // Update showing text
         historyShowingFrom.textContent = pagination.showing_from;
         historyShowingTo.textContent = pagination.showing_to;
         historyTotalRecords.textContent = pagination.total_records;
         
-        // Update mobile buttons
         historyPrevMobile.disabled = !pagination.has_prev;
         historyNextMobile.disabled = !pagination.has_next;
         
-        // Generate page numbers
         let paginationHTML = '';
         
-        // Previous button
         if (pagination.has_prev) {
-            paginationHTML += `
-                <button class="history-page-btn relative inline-flex items-center px-1.5 py-1.5 rounded-l-md border border-gray-300 bg-white text-sm font-medium text-gray-500 hover:bg-gray-50" data-page="${pagination.current_page - 1}">
-                    <i class="h-3 w-3" data-lucide="chevron-left"></i>
-                </button>
-            `;
+            paginationHTML += `<button class="history-page-btn relative inline-flex items-center px-1.5 py-1.5 rounded-l-md border border-gray-300 bg-white text-sm font-medium text-gray-500 hover:bg-gray-50" data-page="${pagination.current_page - 1}"><i class="h-3 w-3" data-lucide="chevron-left"></i></button>`;
         } else {
-            paginationHTML += `
-                <button class="relative inline-flex items-center px-1.5 py-1.5 rounded-l-md border border-gray-300 bg-gray-50 text-sm font-medium text-gray-300 cursor-not-allowed" disabled>
-                    <i class="h-3 w-3" data-lucide="chevron-left"></i>
-                </button>
-            `;
+            paginationHTML += `<button class="relative inline-flex items-center px-1.5 py-1.5 rounded-l-md border border-gray-300 bg-gray-50 text-sm font-medium text-gray-300 cursor-not-allowed" disabled><i class="h-3 w-3" data-lucide="chevron-left"></i></button>`;
         }
         
-        // Page numbers (show max 7 pages)
         const maxPages = 7;
         let startPage = Math.max(1, pagination.current_page - Math.floor(maxPages / 2));
         let endPage = Math.min(pagination.total_pages, startPage + maxPages - 1);
@@ -1293,98 +1562,67 @@ document.addEventListener('DOMContentLoaded', () => {
             startPage = Math.max(1, endPage - maxPages + 1);
         }
         
-        // First page + ellipsis
         if (startPage > 1) {
-            paginationHTML += `
-                <button class="history-page-btn relative inline-flex items-center px-3 py-1.5 border border-gray-300 bg-white text-sm font-medium text-gray-700 hover:bg-gray-50" data-page="1">1</button>
-            `;
+            paginationHTML += `<button class="history-page-btn relative inline-flex items-center px-3 py-1.5 border border-gray-300 bg-white text-sm font-medium text-gray-700 hover:bg-gray-50" data-page="1">1</button>`;
             if (startPage > 2) {
                 paginationHTML += `<span class="relative inline-flex items-center px-3 py-1.5 border border-gray-300 bg-white text-sm font-medium text-gray-700">...</span>`;
             }
         }
         
-        // Page numbers
         for (let i = startPage; i <= endPage; i++) {
             if (i === pagination.current_page) {
-                paginationHTML += `
-                    <button class="relative inline-flex items-center px-3 py-1.5 border border-gray-300 bg-blue-50 text-sm font-medium text-blue-600 cursor-default">${i}</button>
-                `;
+                paginationHTML += `<button class="relative inline-flex items-center px-3 py-1.5 border border-gray-300 bg-blue-50 text-sm font-medium text-blue-600 cursor-default">${i}</button>`;
             } else {
-                paginationHTML += `
-                    <button class="history-page-btn relative inline-flex items-center px-3 py-1.5 border border-gray-300 bg-white text-sm font-medium text-gray-700 hover:bg-gray-50" data-page="${i}">${i}</button>
-                `;
+                paginationHTML += `<button class="history-page-btn relative inline-flex items-center px-3 py-1.5 border border-gray-300 bg-white text-sm font-medium text-gray-700 hover:bg-gray-50" data-page="${i}">${i}</button>`;
             }
         }
         
-        // Last page + ellipsis
         if (endPage < pagination.total_pages) {
             if (endPage < pagination.total_pages - 1) {
                 paginationHTML += `<span class="relative inline-flex items-center px-3 py-1.5 border border-gray-300 bg-white text-sm font-medium text-gray-700">...</span>`;
             }
-            paginationHTML += `
-                <button class="history-page-btn relative inline-flex items-center px-3 py-1.5 border border-gray-300 bg-white text-sm font-medium text-gray-700 hover:bg-gray-50" data-page="${pagination.total_pages}">${pagination.total_pages}</button>
-            `;
+            paginationHTML += `<button class="history-page-btn relative inline-flex items-center px-3 py-1.5 border border-gray-300 bg-white text-sm font-medium text-gray-700 hover:bg-gray-50" data-page="${pagination.total_pages}">${pagination.total_pages}</button>`;
         }
         
-        // Next button
         if (pagination.has_next) {
-            paginationHTML += `
-                <button class="history-page-btn relative inline-flex items-center px-1.5 py-1.5 rounded-r-md border border-gray-300 bg-white text-sm font-medium text-gray-500 hover:bg-gray-50" data-page="${pagination.current_page + 1}">
-                    <i class="h-3 w-3" data-lucide="chevron-right"></i>
-                </button>
-            `;
+            paginationHTML += `<button class="history-page-btn relative inline-flex items-center px-1.5 py-1.5 rounded-r-md border border-gray-300 bg-white text-sm font-medium text-gray-500 hover:bg-gray-50" data-page="${pagination.current_page + 1}"><i class="h-3 w-3" data-lucide="chevron-right"></i></button>`;
         } else {
-            paginationHTML += `
-                <button class="relative inline-flex items-center px-1.5 py-1.5 rounded-r-md border border-gray-300 bg-gray-50 text-sm font-medium text-gray-300 cursor-not-allowed" disabled>
-                    <i class="h-3 w-3" data-lucide="chevron-right"></i>
-                </button>
-            `;
+            paginationHTML += `<button class="relative inline-flex items-center px-1.5 py-1.5 rounded-r-md border border-gray-300 bg-gray-50 text-sm font-medium text-gray-300 cursor-not-allowed" disabled><i class="h-3 w-3" data-lucide="chevron-right"></i></button>`;
         }
         
         historyPageNumbers.innerHTML = paginationHTML;
         
-        // Initialize Lucide icons for pagination
         if (typeof lucide !== 'undefined') {
             setTimeout(() => lucide.createIcons(), 10);
         }
     }
-    
-    // Function to setup pagination event listeners
     function setupHistoryPaginationListeners() {
         const historyPerPage = document.getElementById('historyPerPage');
         const historyPrevMobile = document.getElementById('historyPrevMobile');
         const historyNextMobile = document.getElementById('historyNextMobile');
         const historyPageNumbers = document.getElementById('historyPageNumbers');
         
-        // Per page change
         historyPerPage.addEventListener('change', async (e) => {
             await loadHistoryPage(1, parseInt(e.target.value));
         });
-        
-        // Mobile previous button
         historyPrevMobile.addEventListener('click', async () => {
             if (window.currentHistoryPage > 1) {
                 await loadHistoryPage(window.currentHistoryPage - 1, parseInt(historyPerPage.value));
             }
         });
-        
-        // Mobile next button
         historyNextMobile.addEventListener('click', async () => {
             await loadHistoryPage(window.currentHistoryPage + 1, parseInt(historyPerPage.value));
         });
-        
-        // Page number clicks (event delegation)
         historyPageNumbers.addEventListener('click', async (e) => {
-            if (e.target.classList.contains('history-page-btn')) {
-                const page = parseInt(e.target.dataset.page);
+            const pageBtn = e.target.closest('.history-page-btn');
+            if (pageBtn) {
+                const page = parseInt(pageBtn.dataset.page);
                 if (page && page !== window.currentHistoryPage) {
                     await loadHistoryPage(page, parseInt(historyPerPage.value));
                 }
             }
         });
     }
-    
-    // Function to open current details modal
     async function openCurrentDetailsModal(shelter) {
         const currentDetailsModal = document.getElementById('currentDetailsModal');
         const currentDetailsShelterName = document.getElementById('currentDetailsShelterName');
@@ -1393,15 +1631,12 @@ document.addEventListener('DOMContentLoaded', () => {
         const currentDetailsContent = document.getElementById('currentDetailsContent');
         const noDetailsMessage = document.getElementById('noDetailsMessage');
         
-        // Set shelter info
         currentDetailsShelterName.textContent = shelter.name;
         currentDetailsShelterType.textContent = shelter.type;
         
-        // Show modal
         currentDetailsModal.classList.remove('hidden');
         currentDetailsModal.classList.add('flex');
         
-        // Show loading indicator
         currentDetailsLoadingIndicator.classList.remove('hidden');
         currentDetailsContent.classList.add('hidden');
         noDetailsMessage.classList.add('hidden');
@@ -1413,27 +1648,19 @@ document.addEventListener('DOMContentLoaded', () => {
             currentDetailsLoadingIndicator.classList.add('hidden');
             
             if (result.status === 'success') {
-                const shelterData = result.data.shelter;
                 const detailsData = result.data.details;
                 
                 if (detailsData) {
-                    // Update summary section
                     const isHospital = shelter.type === 'รพ.สต.';
-                    const totalLabel = isHospital ? 'ผู้ป่วยรวม' : 'ผู้เข้าพักรวม';
-                    document.getElementById('currentTotalLabel').textContent = totalLabel;
-                    
+                    document.getElementById('currentTotalLabel').textContent = isHospital ? 'ผู้ป่วยรวม' : 'ผู้เข้าพักรวม';
                     document.getElementById('currentTotalCount').textContent = detailsData.total_patients || 0;
                     document.getElementById('currentMaleCount').textContent = detailsData.male_patients || 0;
                     document.getElementById('currentFemaleCount').textContent = detailsData.female_patients || 0;
                     document.getElementById('currentPregnantCount').textContent = detailsData.pregnant_women || 0;
-                    
-                    // Update special groups section
                     document.getElementById('currentDisabledCount').textContent = detailsData.disabled_patients || 0;
                     document.getElementById('currentBedriddenCount').textContent = detailsData.bedridden_patients || 0;
                     document.getElementById('currentElderlyCount').textContent = detailsData.elderly_patients || 0;
                     document.getElementById('currentChildCount').textContent = detailsData.child_patients || 0;
-                    
-                    // Update chronic diseases section
                     document.getElementById('currentChronicCount').textContent = detailsData.chronic_disease_patients || 0;
                     document.getElementById('currentDiabetesCount').textContent = detailsData.diabetes_patients || 0;
                     document.getElementById('currentHypertensionCount').textContent = detailsData.hypertension_patients || 0;
@@ -1442,10 +1669,8 @@ document.addEventListener('DOMContentLoaded', () => {
                     document.getElementById('currentKidneyCount').textContent = detailsData.kidney_disease_patients || 0;
                     document.getElementById('currentOtherCount').textContent = detailsData.other_monitored_diseases || 0;
                     
-                    // Update report info section
                     if (detailsData.report_date) {
-                        const reportDate = new Date(detailsData.report_date);
-                        document.getElementById('currentReportDate').textContent = reportDate.toLocaleDateString('th-TH');
+                        document.getElementById('currentReportDate').textContent = new Date(detailsData.report_date).toLocaleDateString('th-TH');
                     } else {
                         document.getElementById('currentReportDate').textContent = '-';
                     }
@@ -1475,16 +1700,31 @@ document.addEventListener('DOMContentLoaded', () => {
             showAlert('error', 'เกิดข้อผิดพลาด', 'ไม่สามารถดึงข้อมูลรายละเอียดได้');
         }
     }
-    
-    if (searchInput) {
-        [searchInput, typeFilter, amphoeFilter, tambonFilter].forEach(el => el.addEventListener('input', render));
-        amphoeFilter.addEventListener('change', () => { populateTambonDropdown(amphoeFilter.value, tambonFilter); render(); });
-        resetFilterBtn.addEventListener('click', () => { searchInput.value = ''; typeFilter.value = ''; amphoeFilter.value = ''; populateTambonDropdown('', tambonFilter); render(); });
-        viewGridBtn.addEventListener('click', () => { if (currentView === 'list') { currentView = 'grid'; viewGridBtn.classList.add('bg-white', 'shadow'); viewGridBtn.classList.remove('text-gray-500'); viewListBtn.classList.remove('bg-white', 'shadow'); viewListBtn.classList.add('text-gray-500'); dataContainer.classList.add('grid', 'grid-cols-1', 'md:grid-cols-2', 'xl:grid-cols-3', 'gap-6'); render(); } });
-        viewListBtn.addEventListener('click', () => { if (currentView === 'grid') { currentView = 'list'; viewListBtn.classList.add('bg-white', 'shadow'); viewListBtn.classList.remove('text-gray-500'); viewGridBtn.classList.remove('bg-white', 'shadow'); viewGridBtn.classList.add('text-gray-500'); render(); } });
-        addShelterBtn.addEventListener('click', () => { shelterModalTitle.textContent = 'เพิ่มศูนย์ช่วยเหลือใหม่'; shelterForm.reset(); populateTambonDropdown('', modalTambon); shelterModal.classList.remove('hidden'); });
-    }
+
+
+    // --- Event Listeners ---
+    // Close dropdown when clicking outside
+    document.addEventListener('click', function(event) {
+        const openDropdowns = document.querySelectorAll('.manage-data-dropdown-menu:not(.hidden)');
+        openDropdowns.forEach(dropdown => {
+            if (!dropdown.parentElement.contains(event.target)) {
+                dropdown.classList.add('hidden');
+            }
+        });
+    });
+
     dataContainer.addEventListener('click', e => {
+        const dropdownToggle = e.target.closest('.manage-data-dropdown-toggle');
+        if (dropdownToggle) {
+            e.preventDefault();
+            const menu = dropdownToggle.nextElementSibling;
+            // Close other dropdowns before opening the new one
+            document.querySelectorAll('.manage-data-dropdown-menu').forEach(m => {
+                if (m !== menu) m.classList.add('hidden');
+            });
+            menu.classList.toggle('hidden');
+        }
+
         const editBtn = e.target.closest('.edit-btn');
         const deleteBtn = e.target.closest('.delete-btn');
         const updateAmountBtn = e.target.closest('.update-amount-btn');
@@ -1561,19 +1801,12 @@ document.addEventListener('DOMContentLoaded', () => {
         const femalePatients = parseInt(formData.get('female_patients')) || 0;
         const pregnantWomen = parseInt(formData.get('pregnant_women')) || 0;
 
-        // Validation 1: Pregnant women check
         if (pregnantWomen > femalePatients) {
             showAlert('error', 'ข้อมูลไม่ถูกต้อง', 'จำนวนหญิงตั้งครรภ์ต้องไม่เกินจำนวนผู้ป่วยหญิงทั้งหมด');
             return;
         }
 
-        // Validation 2: Sub-groups total check
-        const subGroups = [
-            'disabled_patients', 'bedridden_patients', 'elderly_patients', 'child_patients',
-            'chronic_disease_patients', 'diabetes_patients', 'hypertension_patients',
-            'heart_disease_patients', 'mental_health_patients', 'kidney_disease_patients',
-            'other_monitored_diseases'
-        ];
+        const subGroups = ['disabled_patients', 'bedridden_patients', 'elderly_patients', 'child_patients', 'chronic_disease_patients', 'diabetes_patients', 'hypertension_patients', 'heart_disease_patients', 'mental_health_patients', 'kidney_disease_patients', 'other_monitored_diseases'];
         const subGroupsTotal = subGroups.reduce((sum, key) => sum + (parseInt(formData.get(key)) || 0), 0);
 
         if (subGroupsTotal > totalPatients) {
@@ -1582,16 +1815,13 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         try {
-            const response = await fetch(`${API_URL}?api=save_hospital_report`, {
-                method: 'POST',
-                body: formData
-            });
+            const response = await fetch(`${API_URL}?api=save_hospital_report`, { method: 'POST', body: formData });
             const result = await response.json();
             
             if (result.status === 'success') {
                 hospitalReportModal.classList.add('hidden');
                 showAlert('success', result.message);
-                mainFetch(); // Refresh shelter data
+                mainFetch();
             } else {
                 showAlert('error', 'เกิดข้อผิดพลาด', result.message);
             }
@@ -1601,10 +1831,117 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     });
     document.getElementById('getCurrentLocation').addEventListener('click', () => { if (!navigator.geolocation) return showAlert('warning', 'ไม่รองรับ'); navigator.geolocation.getCurrentPosition( pos => { shelterForm.elements.latitude.value = pos.coords.latitude.toFixed(6); shelterForm.elements.longitude.value = pos.coords.longitude.toFixed(6); }, () => showAlert('error', 'ไม่สามารถดึงพิกัดได้') ); });
-    if(exportCsvBtn) {
-        exportCsvBtn.addEventListener('click', () => {
-            let filteredData = allShelters;
-             if(searchInput) {
+
+    // --- Admin-only script initialization ---
+    const userRole = "<?= $_SESSION['role'] ?? 'User' ?>";
+    if (userRole === 'Admin') {
+        const importCsvBtn = document.getElementById('importCsvBtn');
+        const importModal = document.getElementById('importModal');
+        const importForm = document.getElementById('importForm');
+        const closeImportModalBtn = document.getElementById('closeImportModal');
+        const cancelImportModalBtn = document.getElementById('cancelImportModal');
+        const downloadTemplateBtn = document.getElementById('downloadTemplateBtn');
+
+        if (importCsvBtn) {
+            importCsvBtn.addEventListener('click', () => {
+                importForm.reset();
+                importModal.classList.remove('hidden');
+                importModal.classList.add('flex');
+            });
+        }
+        if(closeImportModalBtn) closeImportModalBtn.addEventListener('click', () => importModal.classList.add('hidden'));
+        if(cancelImportModalBtn) cancelImportModalBtn.addEventListener('click', () => importModal.classList.add('hidden'));
+
+        if(downloadTemplateBtn) {
+             downloadTemplateBtn.addEventListener('click', () => {
+                const headers = "id,name,type,capacity,coordinator,phone,amphoe,tambon,latitude,longitude";
+                const csvContent = "\uFEFF" + headers + "\n"; // BOM for UTF-8 Excel support
+                const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+                const link = document.createElement("a");
+                const url = URL.createObjectURL(blob);
+                link.setAttribute("href", url);
+                link.setAttribute("download", "template_shelters.csv");
+                link.style.visibility = 'hidden';
+                document.body.appendChild(link);
+                link.click();
+                document.body.removeChild(link);
+            });
+        }
+
+        if(importForm) {
+            importForm.addEventListener('submit', async (e) => {
+                e.preventDefault();
+                const csvFileInput = document.getElementById('csvFile');
+                if (!csvFileInput.files || csvFileInput.files.length === 0) {
+                    showAlert('warning', 'กรุณาเลือกไฟล์', 'คุณยังไม่ได้เลือกไฟล์ CSV ที่จะนำเข้า');
+                    return;
+                }
+    
+                const formData = new FormData();
+                formData.append('csvFile', csvFileInput.files[0]);
+    
+                Swal.fire({
+                    title: 'กำลังนำเข้าข้อมูล...',
+                    text: 'กรุณารอสักครู่',
+                    allowOutsideClick: false,
+                    didOpen: () => {
+                        Swal.showLoading();
+                    }
+                });
+    
+                try {
+                    const response = await fetch(`${API_URL}?api=import_shelters`, {
+                        method: 'POST',
+                        body: formData
+                    });
+    
+                    const result = await response.json();
+                    
+                    if (result.status === 'success') {
+                        importModal.classList.add('hidden');
+                        Swal.fire({
+                            icon: 'success',
+                            title: 'นำเข้าสำเร็จ!',
+                            text: result.message
+                        });
+                        mainFetch(); 
+                    } else {
+                        Swal.fire({
+                            icon: 'error',
+                            title: 'นำเข้าไม่สำเร็จ',
+                            text: result.message
+                        });
+                    }
+                } catch (error) {
+                     Swal.fire({
+                        icon: 'error',
+                        title: 'การเชื่อมต่อล้มเหลว',
+                        text: 'ไม่สามารถส่งข้อมูลไปยังเซิร์ฟเวอร์ได้'
+                    });
+                    console.error('Import error:', error);
+                }
+            });
+        }
+
+        const searchInput = document.getElementById('searchInput');
+        const typeFilter = document.getElementById('typeFilter');
+        const amphoeFilter = document.getElementById('amphoeFilter');
+        const tambonFilter = document.getElementById('tambonFilter');
+        const viewGridBtn = document.getElementById('viewGridBtn');
+        const viewListBtn = document.getElementById('viewListBtn');
+        const addShelterBtn = document.getElementById('addShelterBtn');
+        const resetFilterBtn = document.getElementById('resetFilterBtn');
+        const exportCsvBtn = document.getElementById('exportCsvBtn');
+
+        if(searchInput && typeFilter && amphoeFilter && tambonFilter) {
+             [searchInput, typeFilter, amphoeFilter, tambonFilter].forEach(el => el.addEventListener('input', render));
+             amphoeFilter.addEventListener('change', () => { populateTambonDropdown(amphoeFilter.value, tambonFilter); render(); });
+             resetFilterBtn.addEventListener('click', () => { searchInput.value = ''; typeFilter.value = ''; amphoeFilter.value = ''; populateTambonDropdown('', tambonFilter); render(); });
+             viewGridBtn.addEventListener('click', () => { if (currentView === 'list') { currentView = 'grid'; viewGridBtn.classList.add('bg-white', 'shadow'); viewGridBtn.classList.remove('text-gray-500'); viewListBtn.classList.remove('bg-white', 'shadow'); viewListBtn.classList.add('text-gray-500'); dataContainer.classList.add('grid', 'grid-cols-1', 'md:grid-cols-2', 'xl:grid-cols-3', 'gap-6'); render(); } });
+             viewListBtn.addEventListener('click', () => { if (currentView === 'grid') { currentView = 'list'; viewListBtn.classList.add('bg-white', 'shadow'); viewListBtn.classList.remove('text-gray-500'); viewGridBtn.classList.remove('bg-white', 'shadow'); viewGridBtn.classList.add('text-gray-500'); render(); } });
+             addShelterBtn.addEventListener('click', () => { shelterModalTitle.textContent = 'เพิ่มศูนย์ช่วยเหลือใหม่'; shelterForm.reset(); populateTambonDropdown('', modalTambon); shelterModal.classList.remove('hidden'); });
+             exportCsvBtn.addEventListener('click', () => {
+                let filteredData = allShelters;
                 const filters = { search: searchInput.value.toLowerCase(), type: typeFilter.value, amphoe: amphoeFilter.value, tambon: tambonFilter.value };
                 filteredData = allShelters.filter(s => {
                     const searchMatch = filters.search === '' || (s.name && s.name.toLowerCase().includes(filters.search)) || (s.coordinator && s.coordinator.toLowerCase().includes(filters.search));
@@ -1613,27 +1950,29 @@ document.addEventListener('DOMContentLoaded', () => {
                     const tambonMatch = filters.tambon === '' || s.tambon === filters.tambon;
                     return searchMatch && typeMatch && amphoeMatch && tambonMatch;
                 });
-            }
-            const headers = ["ID", "ชื่อศูนย์", "ประเภท", "ความจุ", "ยอดปัจจุบัน", "ผู้ประสานงาน", "เบอร์โทร", "อำเภอ", "ตำบล", "ละติจูด", "ลองจิจูด"];
-            const rows = filteredData.map(s => [s.id, s.name, s.type, s.capacity, s.current_occupancy, s.coordinator, s.phone, s.amphoe, s.tambon, s.latitude, s.longitude].map(val => `"${String(val || '').replace(/"/g, '""')}"`));
-            let csvContent = "\uFEFF" + headers.join(",") + "\n" + rows.map(e => e.join(",")).join("\n");
-            var blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
-            var link = document.createElement("a");
-            if (link.download !== undefined) {
-                var url = URL.createObjectURL(blob);
-                link.setAttribute("href", url);
-                link.setAttribute("download", "shelters_export.csv");
-                link.style.visibility = 'hidden';
-                document.body.appendChild(link);
-                link.click();
-                document.body.removeChild(link);
-            }
-        });
+
+                const headers = ["id", "name", "type", "capacity", "current_occupancy", "coordinator", "phone", "amphoe", "tambon", "latitude", "longitude"];
+                const rows = filteredData.map(s => [s.id, s.name, s.type, s.capacity, s.current_occupancy, s.coordinator, s.phone, s.amphoe, s.tambon, s.latitude, s.longitude].map(val => `"${String(val || '').replace(/"/g, '""')}"`));
+                let csvContent = "\uFEFF" + headers.join(",") + "\n" + rows.map(e => e.join(",")).join("\n");
+                var blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+                var link = document.createElement("a");
+                if (link.download !== undefined) {
+                    var url = URL.createObjectURL(blob);
+                    link.setAttribute("href", url);
+                    link.setAttribute("download", "shelters_export.csv");
+                    link.style.visibility = 'hidden';
+                    document.body.appendChild(link);
+                    link.click();
+                    document.body.removeChild(link);
+                }
+            });
+        }
     }
+    
+    // Initial Load
     populateAmphoeDropdowns();
     mainFetch();
     
-    // Initialize Lucide icons
     if (typeof lucide !== 'undefined') {
         lucide.createIcons();
     }
