@@ -53,12 +53,12 @@ function getUserPermissions($conn, $user_id, $role) {
 
     switch($role) {
         case 'Admin':
-            $permissions['allowed_pages'] = ['dashboard', 'shelters', 'users', 'settings', 'reports'];
+            $permissions['allowed_pages'] = ['dashboard', 'shelters', 'users', 'settings', 'reports', 'update_shelter_details'];
             $permissions['can_manage_all'] = true;
             break;
 
         case 'HealthStaff':
-            $permissions['allowed_pages'] = ['dashboard', 'shelters'];
+            $permissions['allowed_pages'] = ['dashboard', 'shelters', 'update_shelter_details'];
             // ดึงข้อมูลศูนย์ที่รับผิดชอบ
             $stmt = $conn->prepare("
                 SELECT shelter_id 
@@ -75,7 +75,7 @@ function getUserPermissions($conn, $user_id, $role) {
             break;
 
         case 'Coordinator':
-            $permissions['allowed_pages'] = ['dashboard', 'shelters'];
+            $permissions['allowed_pages'] = ['dashboard', 'shelters', 'update_shelter_details'];
             // ดึงข้อมูลศูนย์ที่รับผิดชอบ
             $stmt = $conn->prepare("
                 SELECT assigned_shelter_id 

@@ -97,7 +97,7 @@ if (isset($_GET['api'])) {
             if ($_SESSION['role'] === 'Coordinator' && $shelter_id_to_edit !== intval($_SESSION['assigned_shelter_id'])) {
                  echo json_encode(['status' => 'error', 'message' => 'ไม่มีสิทธิ์แก้ไขศูนย์นี้']); exit();
             }
-             $stmt = $conn->prepare("UPDATE shelters SET name=?, type=?, capacity=?, coordinator=?, phone=?, amphoe, tambon, latitude, longitude=? WHERE id=?");
+             $stmt = $conn->prepare("UPDATE shelters SET name=?, type=?, capacity=?, coordinator=?, phone=?, amphoe=?, tambon=?, latitude=?, longitude=? WHERE id=?");
              $capacity = isset($data['capacity']) && $data['capacity'] !== '' ? intval($data['capacity']) : 0;
              $stmt->bind_param("ssissssssi", $data['name'], $data['type'], $capacity, $data['coordinator'], $data['phone'], $data['amphoe'], $data['tambon'], $data['latitude'], $data['longitude'], $data['id']);
              if ($stmt->execute()) {
@@ -173,9 +173,8 @@ if (isset($_GET['api'])) {
                 exit();
             }
             
-            // Trim BOM if present
             fseek($file_handle, 0);
-            if (fread($file_handle, 3) !== "\xef\xbb\xbf") {
+            if (fgets($file_handle, 4) !== "\xef\xbb\xbf") {
                 rewind($file_handle);
             }
         
@@ -185,7 +184,6 @@ if (isset($_GET['api'])) {
                 fclose($file_handle);
                 exit();
             }
-            $header = array_map('trim', $header);
             
             $required_headers = ['name', 'type'];
             foreach($required_headers as $rh) {
@@ -200,28 +198,12 @@ if (isset($_GET['api'])) {
             $inserted_count = 0;
             $updated_count = 0;
             $error_count = 0;
-            $skipped_count = 0;
         
             try {
                 $insert_stmt = $conn->prepare("INSERT INTO shelters (name, type, capacity, coordinator, phone, amphoe, tambon, latitude, longitude) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)");
                 $update_stmt = $conn->prepare("UPDATE shelters SET name=?, type=?, capacity=?, coordinator=?, phone=?, amphoe=?, tambon=?, latitude=?, longitude=? WHERE id=?");
-                $check_stmt = $conn->prepare("SELECT id FROM shelters WHERE name = ?");
-
+        
                 while (($row = fgetcsv($file_handle)) !== false) {
-                    // Handle empty lines in CSV
-                    if (count($row) === 1 && is_null($row[0])) {
-                        continue;
-                    }
-
-                    $row_count = count($row);
-                    $header_count = count($header);
-
-                    if ($row_count < $header_count) {
-                       $row = array_pad($row, $header_count, null);
-                    } elseif ($row_count > $header_count) {
-                       $row = array_slice($row, 0, $header_count);
-                    }
-                    
                     $data = array_combine($header, $row);
         
                     $name = trim($data['name'] ?? '');
@@ -247,15 +229,6 @@ if (isset($_GET['api'])) {
                             $updated_count++;
                         }
                     } else {
-                        // Check for duplicate name before inserting
-                        $check_stmt->bind_param("s", $name);
-                        $check_stmt->execute();
-                        $check_result = $check_stmt->get_result();
-                        if ($check_result->num_rows > 0) {
-                            $skipped_count++;
-                            continue;
-                        }
-
                         $insert_stmt->bind_param("ssissssss", $name, $type, $capacity, $coordinator, $phone, $amphoe, $tambon, $latitude, $longitude);
                         if ($insert_stmt->execute()) {
                             $inserted_count++;
@@ -268,15 +241,11 @@ if (isset($_GET['api'])) {
                 $conn->commit();
                 $insert_stmt->close();
                 $update_stmt->close();
-                $check_stmt->close();
                 fclose($file_handle);
                 
-                $message = "นำเข้าสำเร็จ! เพิ่มข้อมูลใหม่ {$inserted_count} รายการ, อัปเดต {$updated_count} รายการ";
-                if ($skipped_count > 0) {
-                    $message .= ", ข้ามข้อมูลซ้ำ {$skipped_count} รายการ";
-                }
+                $message = "นำเข้าสำเร็จ! เพิ่มข้อมูลใหม่ {$inserted_count} รายการ, อัปเดตข้อมูล {$updated_count} รายการ";
                 if ($error_count > 0) {
-                    $message .= ", ข้อมูลไม่สมบูรณ์ {$error_count} รายการ";
+                    $message .= ", เกิดข้อผิดพลาด {$error_count} รายการ";
                 }
         
                 echo json_encode(['status' => 'success', 'message' => $message]);
