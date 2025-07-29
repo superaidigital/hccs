@@ -23,12 +23,10 @@ if (isset($_GET['api'])) {
         case 'get_shelters':
             $result = null;
 
-            // Explicitly handle Admin role first to ensure they get all data
             if ($_SESSION['role'] === 'Admin') {
                 $sql = "SELECT * FROM shelters ORDER BY name ASC";
                 $result = $conn->query($sql);
             }
-            // Handle Coordinator
             elseif ($_SESSION['role'] === 'Coordinator' && isset($_SESSION['assigned_shelter_id'])) {
                 $assigned_id = intval($_SESSION['assigned_shelter_id']);
                 $stmt = $conn->prepare("SELECT * FROM shelters WHERE id = ?");
@@ -37,7 +35,6 @@ if (isset($_GET['api'])) {
                 $result = $stmt->get_result();
                 $stmt->close();
             }
-            // Handle HealthStaff
             elseif ($_SESSION['role'] === 'HealthStaff') {
                 $allowed_shelters = $_SESSION['permissions']['allowed_shelters'] ?? [];
 
@@ -47,17 +44,13 @@ if (isset($_GET['api'])) {
                     $sql = "SELECT * FROM shelters WHERE id IN ($id_list) ORDER BY name ASC";
                     $result = $conn->query($sql);
                 }
-                // If HealthStaff has no assigned shelters, $result remains null
-                // The logic below will correctly return an empty array.
             }
-            // Fallback for other roles like 'User'
             else {
                 $sql = "SELECT * FROM shelters ORDER BY name ASC";
                 $result = $conn->query($sql);
             }
 
             $shelters = [];
-            // This check handles all cases, including if a query fails ($result is null)
             if ($result && $result->num_rows > 0) {
                 while($row = $result->fetch_assoc()) {
                     $shelters[] = $row;
@@ -70,7 +63,6 @@ if (isset($_GET['api'])) {
             if ($_SESSION['role'] !== 'Admin') {
                 echo json_encode(['status' => 'error', 'message' => 'ไม่มีสิทธิ์ดำเนินการ']); exit();
             }
-            // Check for duplicate shelter name
             $check_stmt = $conn->prepare("SELECT id FROM shelters WHERE name = ?");
             $check_stmt->bind_param("s", $data['name']);
             $check_stmt->execute();
@@ -134,7 +126,7 @@ if (isset($_GET['api'])) {
                 $result = $conn->query("SELECT current_occupancy FROM shelters WHERE id = $shelter_id FOR UPDATE");
                 $shelter = $result->fetch_assoc();
                 $current_total = $shelter['current_occupancy'];
-                $new_total = ($log_type == 'add') ? $current_total + $change_amount : $current_total - $change_amount;
+                $new_total = ($log_type == 'add') ? $current_total + $change_amount : max(0, $current_total - $change_amount);
                 $stmt_update = $conn->prepare("UPDATE shelters SET current_occupancy = ? WHERE id = ?");
                 $stmt_update->bind_param("ii", $new_total, $shelter_id);
                 $stmt_update->execute();
@@ -268,173 +260,155 @@ if (isset($_GET['api'])) {
             $stmt->close();
             break;
         case 'save_hospital_report':
+            $conn->begin_transaction();
             try {
                 $data = $_POST;
                 $shelter_id = intval($data['shelter_id']);
                 $report_date = $data['report_date'] ?? date('Y-m-d');
-                $operation_type = $data['operation_type'] ?? 'add'; // 'add' หรือ 'subtract'
+                $operation_type = $data['operation_type'] ?? 'add';
                 
-                // Validate required fields
                 if (!$shelter_id) {
-                    echo json_encode(['status' => 'error', 'message' => 'ไม่พบ ID ศูนย์']);
-                    break;
+                    throw new Exception('ไม่พบ ID ศูนย์');
                 }
                 
-                // ดึงข้อมูลปัจจุบันจาก shelters
-                $current_stmt = $conn->prepare("SELECT current_occupancy FROM shelters WHERE id = ?");
+                // START: Server-side validation
+                $total_patients_change = intval($data['total_patients'] ?? 0);
+                $subgroup_keys = [
+                    'pregnant_women', 'disabled_patients', 'bedridden_patients', 'elderly_patients', 'child_patients',
+                    'chronic_disease_patients', 'diabetes_patients', 'hypertension_patients', 'heart_disease_patients',
+                    'mental_health_patients', 'kidney_disease_patients', 'other_monitored_diseases'
+                ];
+                $subgroups_total_change = 0;
+                foreach($subgroup_keys as $key) {
+                    $subgroups_total_change += intval($data[$key] ?? 0);
+                }
+                if ($subgroups_total_change > $total_patients_change) {
+                     throw new Exception("ยอดรวมในกลุ่มย่อย ({$subgroups_total_change}) ต้องไม่เกินจำนวนรวมทั้งหมด ({$total_patients_change})");
+                }
+                // END: Server-side validation
+
+                $current_stmt = $conn->prepare("SELECT current_occupancy FROM shelters WHERE id = ? FOR UPDATE");
                 $current_stmt->bind_param("i", $shelter_id);
                 $current_stmt->execute();
-                $current_result = $current_stmt->get_result();
-                $current_data = $current_result->fetch_assoc();
+                $current_data = $current_stmt->get_result()->fetch_assoc();
                 $old_occupancy = $current_data ? intval($current_data['current_occupancy']) : 0;
                 $current_stmt->close();
                 
-                // คำนวณยอดใหม่โดยการเพิ่ม/ลดจากยอดเดิม
                 $change_amount = intval($data['total_patients'] ?? 0);
-                if ($operation_type === 'subtract') {
-                    $new_total = max(0, $old_occupancy - $change_amount); // ไม่ให้ติดลบ
-                } else {
-                    $new_total = $old_occupancy + $change_amount;
+                $new_total = ($operation_type === 'add') ? $old_occupancy + $change_amount : max(0, $old_occupancy - $change_amount);
+                
+                $field_keys = ['male', 'female', 'pregnant_women', 'disabled', 'bedridden', 'elderly', 'child', 'chronic_disease', 'diabetes', 'hypertension', 'heart_disease', 'mental_health', 'kidney_disease', 'other_monitored_diseases'];
+                $changes = [];
+                foreach($field_keys as $key){
+                    $changes[$key] = intval($data[$key.'_patients'] ?? $data[$key] ?? 0);
                 }
-                
-                // คำนวณข้อมูลอื่นๆ (เพิ่ม/ลด)
-                $male_change = intval($data['male_patients'] ?? 0);
-                $female_change = intval($data['female_patients'] ?? 0);
-                $pregnant_change = intval($data['pregnant_women'] ?? 0);
-                $disabled_change = intval($data['disabled_patients'] ?? 0);
-                $bedridden_change = intval($data['bedridden_patients'] ?? 0);
-                $elderly_change = intval($data['elderly_patients'] ?? 0);
-                $child_change = intval($data['child_patients'] ?? 0);
-                $chronic_change = intval($data['chronic_disease_patients'] ?? 0);
-                $diabetes_change = intval($data['diabetes_patients'] ?? 0);
-                $hypertension_change = intval($data['hypertension_patients'] ?? 0);
-                $heart_change = intval($data['heart_disease_patients'] ?? 0);
-                $mental_change = intval($data['mental_health_patients'] ?? 0);
-                $kidney_change = intval($data['kidney_disease_patients'] ?? 0);
-                $other_change = intval($data['other_monitored_diseases'] ?? 0);
-                
-                // ดึงข้อมูลเดิมจาก hospital_daily_reports หรือใช้ค่า 0 ถ้าไม่มี
-                $check_stmt = $conn->prepare("SELECT * FROM hospital_daily_reports WHERE shelter_id = ? AND report_date = ?");
+
+                $check_stmt = $conn->prepare("SELECT * FROM hospital_daily_reports WHERE shelter_id = ? AND report_date = ? FOR UPDATE");
                 $check_stmt->bind_param("is", $shelter_id, $report_date);
                 $check_stmt->execute();
                 $existing_data = $check_stmt->get_result()->fetch_assoc();
                 $check_stmt->close();
                 
-                // คำนวณยอดใหม่สำหรับแต่ละฟิลด์
-                if ($operation_type === 'subtract') {
-                    $total_patients = $new_total;
-                    $male_patients = max(0, ($existing_data['male_patients'] ?? 0) - $male_change);
-                    $female_patients = max(0, ($existing_data['female_patients'] ?? 0) - $female_change);
-                    $pregnant_women = max(0, ($existing_data['pregnant_women'] ?? 0) - $pregnant_change);
-                    $disabled_patients = max(0, ($existing_data['disabled_patients'] ?? 0) - $disabled_change);
-                    $bedridden_patients = max(0, ($existing_data['bedridden_patients'] ?? 0) - $bedridden_change);
-                    $elderly_patients = max(0, ($existing_data['elderly_patients'] ?? 0) - $elderly_change);
-                    $child_patients = max(0, ($existing_data['child_patients'] ?? 0) - $child_change);
-                    $chronic_disease_patients = max(0, ($existing_data['chronic_disease_patients'] ?? 0) - $chronic_change);
-                    $diabetes_patients = max(0, ($existing_data['diabetes_patients'] ?? 0) - $diabetes_change);
-                    $hypertension_patients = max(0, ($existing_data['hypertension_patients'] ?? 0) - $hypertension_change);
-                    $heart_disease_patients = max(0, ($existing_data['heart_disease_patients'] ?? 0) - $heart_change);
-                    $mental_health_patients = max(0, ($existing_data['mental_health_patients'] ?? 0) - $mental_change);
-                    $kidney_disease_patients = max(0, ($existing_data['kidney_disease_patients'] ?? 0) - $kidney_change);
-                    $other_monitored_diseases = max(0, ($existing_data['other_monitored_diseases'] ?? 0) - $other_change);
-                } else {
-                    $total_patients = $new_total;
-                    $male_patients = ($existing_data['male_patients'] ?? 0) + $male_change;
-                    $female_patients = ($existing_data['female_patients'] ?? 0) + $female_change;
-                    $pregnant_women = ($existing_data['pregnant_women'] ?? 0) + $pregnant_change;
-                    $disabled_patients = ($existing_data['disabled_patients'] ?? 0) + $disabled_change;
-                    $bedridden_patients = ($existing_data['bedridden_patients'] ?? 0) + $bedridden_change;
-                    $elderly_patients = ($existing_data['elderly_patients'] ?? 0) + $elderly_change;
-                    $child_patients = ($existing_data['child_patients'] ?? 0) + $child_change;
-                    $chronic_disease_patients = ($existing_data['chronic_disease_patients'] ?? 0) + $chronic_change;
-                    $diabetes_patients = ($existing_data['diabetes_patients'] ?? 0) + $diabetes_change;
-                    $hypertension_patients = ($existing_data['hypertension_patients'] ?? 0) + $hypertension_change;
-                    $heart_disease_patients = ($existing_data['heart_disease_patients'] ?? 0) + $heart_change;
-                    $mental_health_patients = ($existing_data['mental_health_patients'] ?? 0) + $mental_change;
-                    $kidney_disease_patients = ($existing_data['kidney_disease_patients'] ?? 0) + $kidney_change;
-                    $other_monitored_diseases = ($existing_data['other_monitored_diseases'] ?? 0) + $other_change;
-                }
-                
-                // บันทึกหรืออัปเดตข้อมูลใน hospital_daily_reports
-                if ($existing_data) {
-                    // Update existing record
-                    $stmt = $conn->prepare("UPDATE hospital_daily_reports SET 
-                        total_patients = ?, male_patients = ?, female_patients = ?, pregnant_women = ?,
-                        disabled_patients = ?, bedridden_patients = ?, elderly_patients = ?, child_patients = ?,
-                        chronic_disease_patients = ?, diabetes_patients = ?, hypertension_patients = ?, 
-                        heart_disease_patients = ?, mental_health_patients = ?, kidney_disease_patients = ?, 
-                        other_monitored_diseases = ?, updated_at = CURRENT_TIMESTAMP
-                        WHERE shelter_id = ? AND report_date = ?");
-                    $stmt->bind_param("iiiiiiiiiiiiiiiis", 
-                        $total_patients, $male_patients, $female_patients, $pregnant_women,
-                        $disabled_patients, $bedridden_patients, $elderly_patients, $child_patients,
-                        $chronic_disease_patients, $diabetes_patients, $hypertension_patients,
-                        $heart_disease_patients, $mental_health_patients, $kidney_disease_patients,
-                        $other_monitored_diseases, $shelter_id, $report_date
-                    );
-                } else {
-                    // Insert new record
-                    $created_by = $_SESSION['user_id'] ?? 1;
-                    
-                    $stmt = $conn->prepare("INSERT INTO hospital_daily_reports (
-                        shelter_id, report_date, total_patients, male_patients, female_patients, pregnant_women,
-                        disabled_patients, bedridden_patients, elderly_patients, child_patients,
-                        chronic_disease_patients, diabetes_patients, hypertension_patients, 
-                        heart_disease_patients, mental_health_patients, kidney_disease_patients, 
-                        other_monitored_diseases, created_by
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
-                    $stmt->bind_param("isiiiiiiiiiiiiiiii", 
-                        $shelter_id, $report_date, $total_patients, $male_patients, $female_patients, $pregnant_women,
-                        $disabled_patients, $bedridden_patients, $elderly_patients, $child_patients,
-                        $chronic_disease_patients, $diabetes_patients, $hypertension_patients,
-                        $heart_disease_patients, $mental_health_patients, $kidney_disease_patients,
-                        $other_monitored_diseases, $created_by
-                    );
-                }
-                
-                if ($stmt->execute()) {
-                    // อัพเดต current_occupancy ในตาราง shelters
-                    $update_shelter = $conn->prepare("UPDATE shelters SET current_occupancy = ? WHERE id = ?");
-                    $update_shelter->bind_param("ii", $total_patients, $shelter_id);
-                    $update_shelter->execute();
-                    $update_shelter->close();
-                    
-                    // เพิ่มข้อมูลลงใน shelter_logs สำหรับการอัปเดตข้อมูล
-                    try {
-                        // ดึงข้อมูลประเภทศูนย์
-                        $shelter_type_stmt = $conn->prepare("SELECT type FROM shelters WHERE id = ?");
-                        $shelter_type_stmt->bind_param("i", $shelter_id);
-                        $shelter_type_stmt->execute();
-                        $shelter_type_result = $shelter_type_stmt->get_result();
-                        $shelter_type_data = $shelter_type_result->fetch_assoc();
-                        $shelter_type = $shelter_type_data ? $shelter_type_data['type'] : 'ศูนย์พักพิง';
-                        $shelter_type_stmt->close();
-                        
-                        // ใช้ข้อมูลจากฟอร์มสำหรับ shelter_logs
-                        $form_change_amount = intval($data['total_patients'] ?? 0);
-                        
-                        if ($form_change_amount > 0) {
-                            // กำหนด item_name ตามประเภทศูนย์
-                            $item_name = $shelter_type === 'รพ.สต.' ? "ผู้ป่วย (รพ.สต.)" : "ผู้เข้าพัก (ศูนย์พักพิง)";
-                            
-                            // บันทึกลงใน shelter_logs
-                            $log_stmt = $conn->prepare("INSERT INTO shelter_logs (shelter_id, item_name, item_unit, change_amount, log_type, new_total) VALUES (?, ?, ?, ?, ?, ?)");
-                            $item_unit = "คน";
-                            $log_stmt->bind_param("issisi", $shelter_id, $item_name, $item_unit, $form_change_amount, $operation_type, $total_patients);
-                            $log_stmt->execute();
-                            $log_stmt->close();
-                        }
-                    } catch (Exception $log_error) {
-                        // ไม่ให้ error ของ shelter_logs ไปกระทบต่อการบันทึกหลัก
-                        error_log("Error logging to shelter_logs: " . $log_error->getMessage());
+                $new_values = [];
+                foreach($changes as $key => $change) {
+                    $db_key_part = ($key === 'pregnant_women' || $key === 'other_monitored_diseases') ? $key : $key . '_patients';
+                    if ($operation_type === 'subtract') {
+                        $new_values[$db_key_part] = max(0, ($existing_data[$db_key_part] ?? 0) - $change);
+                    } else {
+                        $new_values[$db_key_part] = ($existing_data[$db_key_part] ?? 0) + $change;
                     }
-                    
-                    echo json_encode(['status' => 'success', 'message' => 'บันทึกข้อมูลสำเร็จ']);
+                }
+                $new_values['total_patients'] = $new_total;
+                
+                if ($existing_data) {
+                    $sql_parts = [];
+                    foreach ($new_values as $key => $value) $sql_parts[] = "`$key` = ?";
+                    $sql = "UPDATE hospital_daily_reports SET " . implode(', ', $sql_parts) . ", updated_at = CURRENT_TIMESTAMP WHERE id = ?";
+                    $types = str_repeat('i', count($new_values)) . 'i';
+                    $params = array_merge(array_values($new_values), [$existing_data['id']]);
+                    $stmt = $conn->prepare($sql);
+                    $stmt->bind_param($types, ...$params);
                 } else {
-                    echo json_encode(['status' => 'error', 'message' => 'เกิดข้อผิดพลาดในการบันทึกข้อมูล: ' . $stmt->error]);
+                    $created_by = $_SESSION['user_id'] ?? null;
+                    $keys = array_keys($new_values);
+                    $sql = "INSERT INTO hospital_daily_reports (shelter_id, report_date, created_by, " . implode(', ', array_map(fn($k) => "`$k`", $keys)) . ") VALUES (?, ?, ?, " . rtrim(str_repeat('?, ', count($keys)), ', ') . ")";
+                    $types = 'isi' . str_repeat('i', count($new_values));
+                    $params = array_merge([$shelter_id, $report_date, $created_by], array_values($new_values));
+                    $stmt = $conn->prepare($sql);
+                    $stmt->bind_param($types, ...$params);
+                }
+                
+                if (!$stmt->execute()) {
+                    throw new Exception("เกิดข้อผิดพลาดในการบันทึกข้อมูลรายงาน: " . $stmt->error);
                 }
                 $stmt->close();
+                
+                $update_shelter = $conn->prepare("UPDATE shelters SET current_occupancy = ? WHERE id = ?");
+                $update_shelter->bind_param("ii", $new_total, $shelter_id);
+                $update_shelter->execute();
+                $update_shelter->close();
+                
+                if ($change_amount > 0) {
+                    $shelter_type_stmt = $conn->prepare("SELECT type FROM shelters WHERE id = ?");
+                    $shelter_type_stmt->bind_param("i", $shelter_id);
+                    $shelter_type_stmt->execute();
+                    $shelter_type_data = $shelter_type_stmt->get_result()->fetch_assoc();
+                    $item_name = ($shelter_type_data && $shelter_type_data['type'] === 'รพ.สต.') ? "ผู้ป่วย (รพ.สต.)" : "ผู้เข้าพัก (ศูนย์พักพิง)";
+                    $shelter_type_stmt->close();
+                    
+                    $log_stmt = $conn->prepare("INSERT INTO shelter_logs (shelter_id, item_name, item_unit, change_amount, log_type, new_total) VALUES (?, ?, 'คน', ?, ?, ?)");
+                    $log_stmt->bind_param("isisi", $shelter_id, $item_name, $change_amount, $operation_type, $new_total);
+                    $log_stmt->execute();
+                    $log_stmt->close();
+                }
+
+                // START: Add log to occupant_update_logs
+                $log_stmt_occupant = $conn->prepare("
+                    INSERT INTO occupant_update_logs (
+                        shelter_id, user_id, operation_type,
+                        total_change, male_change, female_change, pregnant_change,
+                        disabled_change, bedridden_change, elderly_change, child_change,
+                        chronic_disease_change, diabetes_change, hypertension_change,
+                        heart_disease_change, mental_health_change, kidney_disease_change,
+                        other_monitored_diseases_change
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ");
+
+                $user_id_log = $_SESSION['user_id'] ?? null;
+                $total_change_log = intval($data['total_patients'] ?? 0);
+                $male_change_log = intval($data['male_patients'] ?? 0);
+                $female_change_log = intval($data['female_patients'] ?? 0);
+                $pregnant_change_log = intval($data['pregnant_women'] ?? 0);
+                $disabled_change_log = intval($data['disabled_patients'] ?? 0);
+                $bedridden_change_log = intval($data['bedridden_patients'] ?? 0);
+                $elderly_change_log = intval($data['elderly_patients'] ?? 0);
+                $child_change_log = intval($data['child_patients'] ?? 0);
+                $chronic_disease_change_log = intval($data['chronic_disease_patients'] ?? 0);
+                $diabetes_change_log = intval($data['diabetes_patients'] ?? 0);
+                $hypertension_change_log = intval($data['hypertension_patients'] ?? 0);
+                $heart_disease_change_log = intval($data['heart_disease_patients'] ?? 0);
+                $mental_health_change_log = intval($data['mental_health_patients'] ?? 0);
+                $kidney_disease_change_log = intval($data['kidney_disease_patients'] ?? 0);
+                $other_monitored_diseases_change_log = intval($data['other_monitored_diseases'] ?? 0);
+
+                $log_stmt_occupant->bind_param("iisiiiiiiiiiiiiiii",
+                    $shelter_id, $user_id_log, $operation_type,
+                    $total_change_log, $male_change_log, $female_change_log, $pregnant_change_log,
+                    $disabled_change_log, $bedridden_change_log, $elderly_change_log, $child_change_log,
+                    $chronic_disease_change_log, $diabetes_change_log, $hypertension_change_log,
+                    $heart_disease_change_log, $mental_health_change_log, $kidney_disease_change_log,
+                    $other_monitored_diseases_change_log
+                );
+                $log_stmt_occupant->execute();
+                $log_stmt_occupant->close();
+                // END: Add log to occupant_update_logs
+                
+                $conn->commit();
+                echo json_encode(['status' => 'success', 'message' => 'บันทึกข้อมูลสำเร็จ']);
+
             } catch (Exception $e) {
+                $conn->rollback();
+                error_log("Save Hospital Report Error: " . $e->getMessage());
                 echo json_encode(['status' => 'error', 'message' => 'เกิดข้อผิดพลาด: ' . $e->getMessage()]);
             }
             break;
@@ -446,25 +420,19 @@ if (isset($_GET['api'])) {
             
             $shelter_id = intval($_GET['shelter_id']);
             $page = isset($_GET['page']) ? max(1, intval($_GET['page'])) : 1;
-            $limit = isset($_GET['limit']) ? max(5, min(50, intval($_GET['limit']))) : 10; // จำกัด 5-50 รายการต่อหน้า, เริ่มต้น 10
+            $limit = isset($_GET['limit']) ? max(5, min(50, intval($_GET['limit']))) : 10;
             $offset = ($page - 1) * $limit;
             
-            // ตรวจสอบสิทธิ์การเข้าใช้งาน
-            if ($_SESSION['role'] === 'Coordinator' && isset($_SESSION['assigned_shelter_id'])) {
-                $assigned_id = intval($_SESSION['assigned_shelter_id']);
-                if ($shelter_id !== $assigned_id) {
-                    echo json_encode(['status' => 'error', 'message' => 'ไม่มีสิทธิ์เข้าถึงข้อมูลของศูนย์นี้']);
-                    exit();
-                }
+            if ($_SESSION['role'] === 'Coordinator' && isset($_SESSION['assigned_shelter_id']) && $shelter_id !== intval($_SESSION['assigned_shelter_id'])) {
+                echo json_encode(['status' => 'error', 'message' => 'ไม่มีสิทธิ์เข้าถึงข้อมูลของศูนย์นี้']);
+                exit();
             }
             
             try {
-                // ดึงข้อมูลชื่อศูนย์
                 $shelter_stmt = $conn->prepare("SELECT name FROM shelters WHERE id = ?");
                 $shelter_stmt->bind_param("i", $shelter_id);
                 $shelter_stmt->execute();
-                $shelter_result = $shelter_stmt->get_result();
-                $shelter_data = $shelter_result->fetch_assoc();
+                $shelter_data = $shelter_stmt->get_result()->fetch_assoc();
                 $shelter_stmt->close();
                 
                 if (!$shelter_data) {
@@ -472,15 +440,12 @@ if (isset($_GET['api'])) {
                     exit();
                 }
                 
-                // นับจำนวน logs ทั้งหมด
                 $count_stmt = $conn->prepare("SELECT COUNT(*) as total FROM shelter_logs WHERE shelter_id = ?");
                 $count_stmt->bind_param("i", $shelter_id);
                 $count_stmt->execute();
-                $count_result = $count_stmt->get_result();
-                $total_records = $count_result->fetch_assoc()['total'];
+                $total_records = $count_stmt->get_result()->fetch_assoc()['total'];
                 $count_stmt->close();
                 
-                // ดึงข้อมูล logs ตาม pagination
                 $logs_stmt = $conn->prepare("SELECT * FROM shelter_logs WHERE shelter_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?");
                 $logs_stmt->bind_param("iii", $shelter_id, $limit, $offset);
                 $logs_stmt->execute();
@@ -492,10 +457,7 @@ if (isset($_GET['api'])) {
                 }
                 $logs_stmt->close();
                 
-                // คำนวณข้อมูล pagination
                 $total_pages = ceil($total_records / $limit);
-                $has_prev = $page > 1;
-                $has_next = $page < $total_pages;
                 
                 echo json_encode([
                     'status' => 'success', 
@@ -507,8 +469,8 @@ if (isset($_GET['api'])) {
                             'total_pages' => $total_pages,
                             'total_records' => $total_records,
                             'per_page' => $limit,
-                            'has_prev' => $has_prev,
-                            'has_next' => $has_next,
+                            'has_prev' => $page > 1,
+                            'has_next' => $page < $total_pages,
                             'showing_from' => $total_records > 0 ? $offset + 1 : 0,
                             'showing_to' => min($offset + $limit, $total_records)
                         ]
@@ -525,23 +487,17 @@ if (isset($_GET['api'])) {
             }
             
             $shelter_id = intval($_GET['shelter_id']);
-            
-            // ตรวจสอบสิทธิ์การเข้าใช้งาน
-            if ($_SESSION['role'] === 'Coordinator' && isset($_SESSION['assigned_shelter_id'])) {
-                $assigned_id = intval($_SESSION['assigned_shelter_id']);
-                if ($shelter_id !== $assigned_id) {
-                    echo json_encode(['status' => 'error', 'message' => 'ไม่มีสิทธิ์เข้าถึงข้อมูลของศูนย์นี้']);
-                    exit();
-                }
+
+            if ($_SESSION['role'] === 'Coordinator' && isset($_SESSION['assigned_shelter_id']) && $shelter_id !== intval($_SESSION['assigned_shelter_id'])) {
+                echo json_encode(['status' => 'error', 'message' => 'ไม่มีสิทธิ์เข้าถึงข้อมูลของศูนย์นี้']);
+                exit();
             }
             
             try {
-                // ดึงข้อมูลพื้นฐานของศูนย์
                 $shelter_stmt = $conn->prepare("SELECT * FROM shelters WHERE id = ?");
                 $shelter_stmt->bind_param("i", $shelter_id);
                 $shelter_stmt->execute();
-                $shelter_result = $shelter_stmt->get_result();
-                $shelter_data = $shelter_result->fetch_assoc();
+                $shelter_data = $shelter_stmt->get_result()->fetch_assoc();
                 $shelter_stmt->close();
                 
                 if (!$shelter_data) {
@@ -549,38 +505,23 @@ if (isset($_GET['api'])) {
                     exit();
                 }
                 
-                // ตรวจสอบว่าเป็นศูนย์ประเภทที่มีรายละเอียดผู้ป่วย/ผู้เข้าพักหรือไม่
+                $details = null;
                 if ($shelter_data['type'] === 'รพ.สต.' || $shelter_data['type'] === 'ศูนย์พักพิง') {
-                    // ดึงข้อมูลรายละเอียดล่าสุดจาก hospital_daily_reports
-                    $report_stmt = $conn->prepare("
-                        SELECT * FROM hospital_daily_reports 
-                        WHERE shelter_id = ? 
-                        ORDER BY report_date DESC, updated_at DESC 
-                        LIMIT 1
-                    ");
+                    $report_stmt = $conn->prepare("SELECT * FROM hospital_daily_reports WHERE shelter_id = ? ORDER BY report_date DESC, updated_at DESC LIMIT 1");
                     $report_stmt->bind_param("i", $shelter_id);
                     $report_stmt->execute();
-                    $report_result = $report_stmt->get_result();
-                    $report_data = $report_result->fetch_assoc();
+                    $details = $report_stmt->get_result()->fetch_assoc();
                     $report_stmt->close();
-                    
-                    echo json_encode([
-                        'status' => 'success',
-                        'data' => [
-                            'shelter' => $shelter_data,
-                            'details' => $report_data
-                        ]
-                    ]);
-                } else {
-                    // สำหรับศูนย์ประเภทอื่นๆ แค่ส่งข้อมูลพื้นฐาน
-                    echo json_encode([
-                        'status' => 'success',
-                        'data' => [
-                            'shelter' => $shelter_data,
-                            'details' => null
-                        ]
-                    ]);
                 }
+
+                echo json_encode([
+                    'status' => 'success',
+                    'data' => [
+                        'shelter' => $shelter_data,
+                        'details' => $details
+                    ]
+                ]);
+
             } catch (Exception $e) {
                 echo json_encode(['status' => 'error', 'message' => 'เกิดข้อผิดพลาด: ' . $e->getMessage()]);
             }
@@ -787,119 +728,136 @@ if (isset($_GET['api'])) {
     </div>
 </div>
 
+<!-- START: Updated Hospital Report Modal with 2 Steps -->
 <div id="hospitalReportModal" class="fixed inset-0 overflow-y-auto h-full w-full justify-center items-center z-50 hidden">
-    <div class="relative mx-auto p-6 md:p-8 border-gray-200 w-full max-w-5xl shadow-2xl rounded-2xl bg-white my-8">
+    <div class="relative mx-auto p-6 md:p-8 border-gray-200 w-full max-w-3xl shadow-2xl rounded-2xl bg-white my-8">
         <button id="closeHospitalReportModal" class="absolute top-4 right-4 text-gray-400 hover:text-gray-600"><i data-lucide="x" class="h-6 w-6"></i></button>
-        <h3 id="hospitalReportModalTitle" class="text-2xl leading-6 font-bold text-gray-900 mb-6">รายงานรายละเอียดผู้ป่วย</h3>
-        <form id="hospitalReportForm" class="space-y-6">
+        <h3 id="hospitalReportModalTitle" class="text-2xl leading-6 font-bold text-gray-900 mb-6"></h3>
+        
+        <form id="hospitalReportForm">
             <input type="hidden" id="hospitalShelterId" name="shelter_id">
             <input type="hidden" id="hospitalReportDate" name="report_date">
             
-            <div class="bg-gray-50 p-4 rounded-lg border">
-                <h4 class="font-semibold text-gray-800 mb-3">การดำเนินการ</h4>
-                <div class="flex flex-col sm:flex-row gap-4 sm:gap-6">
-                    <label class="flex items-center cursor-pointer">
-                        <input type="radio" name="operation_type" value="add" class="h-4 w-4 text-green-600 border-gray-300 focus:ring-green-500" checked>
-                        <span class="ml-2 font-medium text-green-700">เพิ่มยอด (+)</span>
-                    </label>
-                    <label class="flex items-center cursor-pointer">
-                        <input type="radio" name="operation_type" value="subtract" class="h-4 w-4 text-red-600 border-gray-300 focus:ring-red-500">
-                        <span class="ml-2 font-medium text-red-700">ลดยอด (-)</span>
-                    </label>
+            <!-- Step 1: Choose Operation -->
+            <div id="formStep1" class="space-y-6">
+                <div class="bg-gray-50 p-4 rounded-lg border">
+                    <h4 class="font-semibold text-gray-800 mb-3">ขั้นตอนที่ 1: เลือกการดำเนินการ</h4>
+                    <div class="grid grid-cols-2 gap-3">
+                        <input type="radio" name="operation_type" value="add" id="op_add" class="peer sr-only">
+                        <label for="op_add" class="flex items-center justify-center gap-2 p-4 rounded-lg border-2 border-gray-300 text-gray-800 cursor-pointer peer-checked:border-red-500 peer-checked:bg-red-50 peer-checked:text-red-700">
+                            <i data-lucide="plus-circle" class="h-5 w-5"></i>
+                            <span class="font-semibold">เพิ่มยอด</span>
+                        </label>
+                        <input type="radio" name="operation_type" value="subtract" id="op_subtract" class="peer sr-only">
+                        <label for="op_subtract" class="flex items-center justify-center gap-2 p-4 rounded-lg border-2 border-gray-300 text-gray-800 cursor-pointer peer-checked:border-blue-500 peer-checked:bg-blue-50 peer-checked:text-blue-700">
+                            <i data-lucide="minus-circle" class="h-5 w-5"></i>
+                            <span class="font-semibold">ลดยอด</span>
+                        </label>
+                    </div>
                 </div>
-                <p class="text-xs text-gray-500 mt-2">
-                    <span class="font-medium">คำแนะนำ:</span> กรุณากรอกจำนวนที่ต้องการ "เปลี่ยนแปลง" จากยอดปัจจุบัน (ไม่ใช่ยอดรวมใหม่)
-                </p>
-            </div>
-            
-            <div class="bg-blue-50 p-4 rounded-lg shadow-sm border border-blue-200">
-                <h4 class="font-semibold text-blue-800 mb-3">ข้อมูลทั่วไป</h4>
-                <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
-                    <div>
-                        <label class="block text-sm font-medium text-gray-700">ชาย</label>
-                        <input type="number" name="male_patients" id="malePatients" min="0" value="0" class="mt-1 block w-full border-gray-300 rounded-lg shadow-sm focus:border-blue-500 focus:ring-blue-500">
-                    </div>
-                    <div>
-                        <label class="block text-sm font-medium text-gray-700">หญิง</label>
-                        <input type="number" name="female_patients" id="femalePatients" min="0" value="0" class="mt-1 block w-full border-gray-300 rounded-lg shadow-sm focus:border-blue-500 focus:ring-blue-500">
-                    </div>
-                    <div>
-                        <label class="block text-sm font-medium text-gray-700">หญิงตั้งครรภ์</label>
-                        <input type="number" name="pregnant_women" id="pregnantWomen" min="0" value="0" class="mt-1 block w-full border-gray-300 rounded-lg shadow-sm focus:border-blue-500 focus:ring-blue-500">
-                    </div>
-                    <div>
-                        <label class="block text-sm font-medium text-gray-700" id="totalPatientsLabel">จำนวนที่เปลี่ยนแปลง</label>
-                        <input type="number" name="total_patients" id="totalPatients" min="0" value="0" class="mt-1 block w-full border-gray-300 rounded-lg bg-gray-100" readonly required>
-                    </div>
+                <div class="flex justify-end gap-4 pt-4 border-t">
+                     <button type="button" id="cancelHospitalReportModalStep1" class="px-6 py-2.5 bg-gray-200 text-gray-800 rounded-lg hover:bg-gray-300 font-medium">ยกเลิก</button>
+                     <button type="button" id="nextStepBtn" class="px-6 py-2.5 bg-blue-600 text-white font-bold rounded-lg hover:bg-blue-700 flex items-center gap-2 disabled:bg-gray-400 disabled:cursor-not-allowed" disabled>
+                        <span>ถัดไป</span><i data-lucide="arrow-right" class="h-5 w-5"></i>
+                    </button>
                 </div>
             </div>
 
-            <div class="bg-yellow-50 p-4 rounded-lg shadow-sm border border-yellow-200">
-                <h4 class="font-semibold text-yellow-800 mb-3">กลุ่มผู้ป่วยพิเศษ</h4>
-                <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
-                    <div>
-                        <label class="block text-sm font-medium text-gray-700">ผู้พิการ</label>
-                        <input type="number" name="disabled_patients" id="disabledPatients" min="0" value="0" class="mt-1 block w-full border-gray-300 rounded-lg shadow-sm focus:border-yellow-500 focus:ring-yellow-500">
+            <!-- Step 2: Fill Details -->
+            <div id="formStep2" class="hidden space-y-6">
+                <div>
+                    <h4 class="font-semibold text-gray-800 mb-3">ขั้นตอนที่ 2: กรอกจำนวนที่เปลี่ยนแปลง</h4>
+                    <p class="text-xs text-gray-500 -mt-2 mb-3">
+                        <span class="font-medium">คำแนะนำ:</span> กรุณากรอกจำนวนที่ต้องการ "เปลี่ยนแปลง" จากยอดปัจจุบัน
+                    </p>
+                </div>
+                <!-- General Info Section -->
+                <div class="bg-blue-50 p-4 rounded-lg shadow-sm border border-blue-200">
+                    <h4 class="font-semibold text-blue-800 mb-3">ข้อมูลทั่วไป</h4>
+                    <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                        <div>
+                            <label for="totalPatients" class="block text-sm font-medium text-gray-700">จำนวนรวม *</label>
+                            <input type="number" name="total_patients" id="totalPatients" min="0" value="0" class="mt-1 block w-full border-gray-300 rounded-lg shadow-sm focus:border-blue-500 focus:ring-blue-500" required>
+                        </div>
+                        <div>
+                            <label for="malePatients" class="block text-sm font-medium text-gray-700">ชาย</label>
+                            <input type="number" name="male_patients" id="malePatients" min="0" value="0" class="mt-1 block w-full border-gray-300 rounded-lg shadow-sm focus:border-blue-500 focus:ring-blue-500">
+                        </div>
+                        <div>
+                            <label for="femalePatients" class="block text-sm font-medium text-gray-700">หญิง</label>
+                            <input type="number" name="female_patients" id="femalePatients" min="0" value="0" class="mt-1 block w-full border-gray-300 rounded-lg shadow-sm focus:border-blue-500 focus:ring-blue-500">
+                        </div>
                     </div>
-                    <div>
-                        <label class="block text-sm font-medium text-gray-700">ผู้ป่วยติดเตียง</label>
-                        <input type="number" name="bedridden_patients" id="bedriddenPatients" min="0" value="0" class="mt-1 block w-full border-gray-300 rounded-lg shadow-sm focus:border-yellow-500 focus:ring-yellow-500">
-                    </div>
-                    <div>
-                        <label class="block text-sm font-medium text-gray-700">ผู้สูงอายุ</label>
-                        <input type="number" name="elderly_patients" id="elderlyPatients" min="0" value="0" class="mt-1 block w-full border-gray-300 rounded-lg shadow-sm focus:border-yellow-500 focus:ring-yellow-500">
-                    </div>
-                    <div>
-                        <label class="block text-sm font-medium text-gray-700">เด็ก</label>
-                        <input type="number" name="child_patients" id="childPatients" min="0" value="0" class="mt-1 block w-full border-gray-300 rounded-lg shadow-sm focus:border-yellow-500 focus:ring-yellow-500">
+                    <p class="text-xs text-gray-500 mt-2">
+                        <span class="font-medium">หมายเหตุ:</span> หากกรอก 'ชาย' และ 'หญิง' ระบบจะคำนวณ 'จำนวนรวม' ให้อัตโนมัติ หากไม่ทราบให้กรอกแค่ 'จำนวนรวม'
+                    </p>
+                </div>
+                <!-- Accordions -->
+                <div class="accordion-item bg-white rounded-lg border">
+                    <button type="button" class="accordion-toggle flex justify-between items-center w-full p-4 text-left font-semibold text-gray-800 hover:bg-gray-50">
+                        <span>กลุ่มผู้ป่วยพิเศษ (คลิกเพื่อแสดง/ซ่อน)</span>
+                        <i data-lucide="chevron-down" class="chevron-icon transition-transform"></i>
+                    </button>
+                    <div class="accordion-content overflow-hidden" style="max-height: 0;">
+                        <div class="p-4 border-t grid grid-cols-2 md:grid-cols-4 gap-4">
+                            <div><label class="block text-sm font-medium text-gray-700">หญิงตั้งครรภ์</label><input type="number" name="pregnant_women" min="0" value="0" class="form-input-subgroup"></div>
+                            <div><label class="block text-sm font-medium text-gray-700">ผู้พิการ</label><input type="number" name="disabled_patients" min="0" value="0" class="form-input-subgroup"></div>
+                            <div><label class="block text-sm font-medium text-gray-700">ผู้ป่วยติดเตียง</label><input type="number" name="bedridden_patients" min="0" value="0" class="form-input-subgroup"></div>
+                            <div><label class="block text-sm font-medium text-gray-700">ผู้สูงอายุ</label><input type="number" name="elderly_patients" min="0" value="0" class="form-input-subgroup"></div>
+                            <div><label class="block text-sm font-medium text-gray-700">เด็ก</label><input type="number" name="child_patients" min="0" value="0" class="form-input-subgroup"></div>
+                        </div>
                     </div>
                 </div>
-            </div>
-
-            <div class="bg-pink-50 p-4 rounded-lg shadow-sm border border-pink-200">
-                <h4 class="font-semibold text-pink-800 mb-3">โรคเรื้อรังและโรคที่ต้องเฝ้าระวัง</h4>
-                <div class="grid grid-cols-2 md:grid-cols-3 gap-4">
-                    <div>
-                        <label class="block text-sm font-medium text-gray-700">ผู้ป่วยโรคเรื้อรัง</label>
-                        <input type="number" name="chronic_disease_patients" id="chronicDiseasePatients" min="0" value="0" class="mt-1 block w-full border-gray-300 rounded-lg shadow-sm focus:border-pink-500 focus:ring-pink-500">
-                    </div>
-                    <div>
-                        <label class="block text-sm font-medium text-gray-700">โรคเบาหวาน</label>
-                        <input type="number" name="diabetes_patients" id="diabetesPatients" min="0" value="0" class="mt-1 block w-full border-gray-300 rounded-lg shadow-sm focus:border-pink-500 focus:ring-pink-500">
-                    </div>
-                    <div>
-                        <label class="block text-sm font-medium text-gray-700">โรคความดันโลหิตสูง</label>
-                        <input type="number" name="hypertension_patients" id="hypertensionPatients" min="0" value="0" class="mt-1 block w-full border-gray-300 rounded-lg shadow-sm focus:border-pink-500 focus:ring-pink-500">
-                    </div>
-                    <div>
-                        <label class="block text-sm font-medium text-gray-700">โรคหัวใจ</label>
-                        <input type="number" name="heart_disease_patients" id="heartDiseasePatients" min="0" value="0" class="mt-1 block w-full border-gray-300 rounded-lg shadow-sm focus:border-pink-500 focus:ring-pink-500">
-                    </div>
-                    <div>
-                        <label class="block text-sm font-medium text-gray-700">จิตเวช</label>
-                        <input type="number" name="mental_health_patients" id="mentalHealthPatients" min="0" value="0" class="mt-1 block w-full border-gray-300 rounded-lg shadow-sm focus:border-pink-500 focus:ring-pink-500">
-                    </div>
-                    <div>
-                        <label class="block text-sm font-medium text-gray-700">ไตวายระยะฟอกไต</label>
-                        <input type="number" name="kidney_disease_patients" id="kidneyDiseasePatients" min="0" value="0" class="mt-1 block w-full border-gray-300 rounded-lg shadow-sm focus:border-pink-500 focus:ring-pink-500">
-                    </div>
-                    <div class="md:col-span-3">
-                        <label class="block text-sm font-medium text-gray-700">โรคที่ต้องเฝ้าระวังอื่นๆ</label>
-                        <input type="number" name="other_monitored_diseases" id="otherMonitoredDiseases" min="0" value="0" class="mt-1 block w-full border-gray-300 rounded-lg shadow-sm focus:border-pink-500 focus:ring-pink-500">
+                <div class="accordion-item bg-white rounded-lg border">
+                    <button type="button" class="accordion-toggle flex justify-between items-center w-full p-4 text-left font-semibold text-gray-800 hover:bg-gray-50">
+                        <span>โรคเรื้อรังและโรคที่ต้องเฝ้าระวัง (คลิกเพื่อแสดง/ซ่อน)</span>
+                        <i data-lucide="chevron-down" class="chevron-icon transition-transform"></i>
+                    </button>
+                    <div class="accordion-content overflow-hidden" style="max-height: 0;">
+                        <div class="p-4 border-t grid grid-cols-2 md:grid-cols-3 gap-4">
+                           <div><label class="block text-sm font-medium text-gray-700">ผู้ป่วยโรคเรื้อรัง</label><input type="number" name="chronic_disease_patients" min="0" value="0" class="form-input-subgroup"></div>
+                           <div><label class="block text-sm font-medium text-gray-700">โรคเบาหวาน</label><input type="number" name="diabetes_patients" min="0" value="0" class="form-input-subgroup"></div>
+                           <div><label class="block text-sm font-medium text-gray-700">โรคความดันโลหิตสูง</label><input type="number" name="hypertension_patients" min="0" value="0" class="form-input-subgroup"></div>
+                           <div><label class="block text-sm font-medium text-gray-700">โรคหัวใจ</label><input type="number" name="heart_disease_patients" min="0" value="0" class="form-input-subgroup"></div>
+                           <div><label class="block text-sm font-medium text-gray-700">จิตเวช</label><input type="number" name="mental_health_patients" min="0" value="0" class="form-input-subgroup"></div>
+                           <div><label class="block text-sm font-medium text-gray-700">ไตวายระยะฟอกไต</label><input type="number" name="kidney_disease_patients" min="0" value="0" class="form-input-subgroup"></div>
+                           <div class="md:col-span-3"><label class="block text-sm font-medium text-gray-700">โรคที่ต้องเฝ้าระวังอื่นๆ</label><input type="number" name="other_monitored_diseases" min="0" value="0" class="form-input-subgroup"></div>
+                        </div>
                     </div>
                 </div>
-            </div>
-
-            <div class="flex justify-end gap-4 pt-4 border-t border-gray-200">
-                <button type="button" id="cancelHospitalReportModal" class="px-6 py-2.5 bg-gray-200 text-gray-800 rounded-lg hover:bg-gray-300 font-medium">ยกเลิก</button>
-                <button type="submit" class="px-6 py-2.5 bg-blue-600 text-white font-bold rounded-lg hover:bg-blue-700 flex items-center gap-2">
-                    <i data-lucide="save" class="h-5 w-5"></i>
-                    <span>บันทึกข้อมูล</span>
-                </button>
+                <div class="flex justify-between gap-4 pt-4 border-t border-gray-200">
+                    <button type="button" id="prevStepBtn" class="px-6 py-2.5 bg-gray-200 text-gray-800 rounded-lg hover:bg-gray-300 font-medium flex items-center gap-2">
+                        <i data-lucide="arrow-left" class="h-5 w-5"></i><span>ย้อนกลับ</span>
+                    </button>
+                    <button type="submit" class="px-6 py-2.5 bg-blue-600 text-white font-bold rounded-lg hover:bg-blue-700 flex items-center gap-2">
+                        <i data-lucide="save" class="h-5 w-5"></i><span>บันทึกข้อมูล</span>
+                    </button>
+                </div>
             </div>
         </form>
     </div>
 </div>
+
+<style>
+    /* Add this style for the accordion and new inputs */
+    .accordion-toggle .chevron-icon { transition: transform 0.3s ease; }
+    .accordion-toggle.active .chevron-icon { transform: rotate(180deg); }
+    .accordion-content { transition: max-height 0.3s ease-in-out, padding 0.3s ease-in-out; }
+    .form-input-subgroup {
+        margin-top: 0.25rem;
+        display: block;
+        width: 100%;
+        border-color: #d1d5db; /* border-gray-300 */
+        border-radius: 0.5rem; /* rounded-lg */
+        box-shadow: 0 1px 2px 0 rgb(0 0 0 / 0.05); /* shadow-sm */
+    }
+    .form-input-subgroup:focus {
+        border-color: #3b82f6; /* focus:border-blue-500 */
+        --tw-ring-color: #3b82f6; /* focus:ring-blue-500 */
+    }
+</style>
+<!-- END: Updated Hospital Report Modal -->
+
 
 <div id="historyModal" class="fixed inset-0 overflow-y-auto h-full w-full justify-center items-center z-50 hidden">
     <div class="relative mx-auto p-3 border border-gray-200 w-full max-w-6xl shadow-2xl rounded-xl bg-white my-2">
@@ -1196,7 +1154,6 @@ document.addEventListener('DOMContentLoaded', () => {
         if (currentView === 'grid') { renderGridView(filteredShelters); } else { renderListView(filteredShelters); }
     }
 
-    // --- RENDER GRID VIEW ---
     function renderGridView(shelters) {
         const userRole = "<?= $_SESSION['role'] ?? 'User' ?>";
         dataContainer.innerHTML = shelters.map(s => {
@@ -1281,7 +1238,6 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
     
-    // --- RENDER LIST VIEW ---
     function renderListView(shelters) {
         dataContainer.classList.remove('grid', 'grid-cols-1', 'md:grid-cols-2', 'xl:grid-cols-3', 'gap-6');
         const userRole = "<?= $_SESSION['role'] ?? 'User' ?>";
@@ -1353,7 +1309,7 @@ document.addEventListener('DOMContentLoaded', () => {
         } catch (error) { console.error('Submit error:', error); return { success: false, message: 'การเชื่อมต่อล้มเหลว' }; }
     }
 
-    // --- Modal Functions (unchanged) ---
+    // --- Modal Functions ---
     function openUpdateModal(shelter) {
         updateAmountForm.reset();
         document.getElementById('updateShelterId').value = shelter.id;
@@ -1371,37 +1327,195 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         updateAmountModal.classList.remove('hidden');
     }
+
+    // --- START: Updated Hospital Report Modal Logic ---
     function setupFormCalculation(form) {
+        const totalInput = form.querySelector('#totalPatients');
         const maleInput = form.querySelector('#malePatients');
         const femaleInput = form.querySelector('#femalePatients');
-        const totalInput = form.querySelector('#totalPatients');
+
         const calculateTotal = () => {
             const male = parseInt(maleInput.value) || 0;
             const female = parseInt(femaleInput.value) || 0;
-            totalInput.value = male + female;
+            if (male > 0 || female > 0) {
+                totalInput.value = male + female;
+            }
         };
+        
         maleInput.addEventListener('input', calculateTotal);
         femaleInput.addEventListener('input', calculateTotal);
     }
+
     async function openHospitalReportModal(shelter) {
-        hospitalReportForm.reset();
+        const modal = document.getElementById('hospitalReportModal');
+        const form = document.getElementById('hospitalReportForm');
+        form.reset();
+
         document.getElementById('hospitalShelterId').value = shelter.id;
         document.getElementById('hospitalReportDate').value = new Date().toISOString().split('T')[0];
         
         const isHospital = shelter.type === 'รพ.สต.';
-        document.getElementById('hospitalReportModalTitle').textContent = isHospital 
+        modal.querySelector('#hospitalReportModalTitle').textContent = isHospital 
             ? `เพิ่ม/ลดจำนวนผู้ป่วย - ${shelter.name}` 
             : `เพิ่ม/ลดจำนวนผู้เข้าพัก - ${shelter.name}`;
         
-        document.querySelector('input[name="operation_type"][value="add"]').checked = true;
+        // Reset to step 1
+        modal.querySelector('#formStep1').classList.remove('hidden');
+        modal.querySelector('#formStep2').classList.add('hidden');
+        modal.querySelector('#op_add').checked = false;
+        modal.querySelector('#op_subtract').checked = false;
+        modal.querySelector('#nextStepBtn').disabled = true;
+
+        setupFormCalculation(form);
         
-        hospitalReportModal.classList.remove('hidden');
-        hospitalReportModal.classList.add('flex');
-        
-        setupFormCalculation(hospitalReportForm);
+        modal.classList.remove('hidden');
+        modal.classList.add('flex');
+
+        if (typeof lucide !== 'undefined') {
+            setTimeout(() => lucide.createIcons(), 50);
+        }
     }
     
-    // History & Details Modal Functions (unchanged)...
+    // Moved Accordion logic to a more reliable place
+    document.getElementById('hospitalReportModal').addEventListener('click', function(e) {
+        const accordionToggle = e.target.closest('.accordion-toggle');
+        if (accordionToggle) {
+            const content = accordionToggle.nextElementSibling;
+            const wasActive = accordionToggle.classList.contains('active');
+
+            // Close all accordions in this modal first
+            this.querySelectorAll('.accordion-toggle').forEach(otherToggle => {
+                otherToggle.classList.remove('active');
+                if (otherToggle.nextElementSibling) {
+                   otherToggle.nextElementSibling.style.maxHeight = null;
+                }
+            });
+
+            // If the clicked one wasn't active, open it
+            if (!wasActive && content) {
+                accordionToggle.classList.add('active');
+                content.style.maxHeight = content.scrollHeight + "px";
+            }
+        }
+    });
+
+
+    hospitalReportForm.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const formData = new FormData(e.target);
+        const data = Object.fromEntries(formData.entries());
+
+        const totalPatients = parseInt(data.total_patients) || 0;
+        const malePatients = parseInt(data.male_patients) || 0;
+        const femalePatients = parseInt(data.female_patients) || 0;
+        const pregnantWomen = parseInt(data.pregnant_women) || 0;
+
+        if (totalPatients === 0) {
+            showAlert('warning', 'กรุณากรอกข้อมูล', 'จำนวนที่เปลี่ยนแปลงต้องไม่เป็น 0');
+            return;
+        }
+        if (malePatients + femalePatients > 0 && malePatients + femalePatients !== totalPatients) {
+            showAlert('error', 'ข้อมูลไม่ถูกต้อง', 'ยอดรวมของชายและหญิงไม่ตรงกับจำนวนรวมที่กรอก');
+            return;
+        }
+        if (pregnantWomen > femalePatients) {
+            showAlert('error', 'ข้อมูลไม่ถูกต้อง', 'จำนวนหญิงตั้งครรภ์ต้องไม่เกินจำนวนผู้เข้าพัก/ผู้ป่วยหญิงทั้งหมด');
+            return;
+        }
+
+        // START: New validation for subgroups total
+        const subGroupKeys = [
+            'pregnant_women', 'disabled_patients', 'bedridden_patients', 'elderly_patients', 'child_patients',
+            'chronic_disease_patients', 'diabetes_patients', 'hypertension_patients', 'heart_disease_patients',
+            'mental_health_patients', 'kidney_disease_patients', 'other_monitored_diseases'
+        ];
+        
+        const subGroupsTotal = subGroupKeys.reduce((sum, key) => {
+            return sum + (parseInt(data[key]) || 0);
+        }, 0);
+
+        if (subGroupsTotal > totalPatients) {
+            showAlert('error', 'ข้อมูลไม่ถูกต้อง', `ยอดรวมในกลุ่มย่อย (${subGroupsTotal}) ต้องไม่เกินจำนวนรวมทั้งหมด (${totalPatients})`);
+            return;
+        }
+        // END: New validation for subgroups total
+        
+        const operationText = data.operation_type === 'add' ? 'เพิ่ม' : 'ลด';
+        const operationColor = data.operation_type === 'add' ? 'text-red-700' : 'text-blue-700';
+
+        let confirmationHtml = `<div class='text-left space-y-2'>
+            <p><strong>การดำเนินการ:</strong> <span class='font-bold ${operationColor}'>${operationText}</span></p>
+            <p><strong>จำนวนรวม:</strong> ${totalPatients} คน</p>`;
+
+        const details = [];
+        if (malePatients > 0) details.push(`ชาย: ${malePatients}`);
+        if (femalePatients > 0) details.push(`หญิง: ${femalePatients}`);
+        if (pregnantWomen > 0) details.push(`ตั้งครรภ์: ${pregnantWomen}`);
+        if (data.disabled_patients > 0) details.push(`ผู้พิการ: ${data.disabled_patients}`);
+        if (data.bedridden_patients > 0) details.push(`ติดเตียง: ${data.bedridden_patients}`);
+        if (data.elderly_patients > 0) details.push(`สูงอายุ: ${data.elderly_patients}`);
+        if (data.child_patients > 0) details.push(`เด็ก: ${data.child_patients}`);
+        if (data.chronic_disease_patients > 0) details.push(`โรคเรื้อรัง: ${data.chronic_disease_patients}`);
+        if (data.diabetes_patients > 0) details.push(`เบาหวาน: ${data.diabetes_patients}`);
+        if (data.hypertension_patients > 0) details.push(`ความดันสูง: ${data.hypertension_patients}`);
+        if (data.heart_disease_patients > 0) details.push(`โรคหัวใจ: ${data.heart_disease_patients}`);
+        if (data.mental_health_patients > 0) details.push(`จิตเวช: ${data.mental_health_patients}`);
+        if (data.kidney_disease_patients > 0) details.push(`ฟอกไต: ${data.kidney_disease_patients}`);
+        if (data.other_monitored_diseases > 0) details.push(`เฝ้าระวังอื่นๆ: ${data.other_monitored_diseases}`);
+
+        if (details.length > 0) {
+            confirmationHtml += `<p><strong>รายละเอียด:</strong> ${details.join(', ')}</p>`;
+        }
+        confirmationHtml += `</div>`;
+
+        Swal.fire({
+            title: 'ยืนยันการบันทึกข้อมูล?',
+            html: confirmationHtml,
+            icon: 'question',
+            showCancelButton: true,
+            confirmButtonColor: '#3085d6',
+            cancelButtonColor: '#d33',
+            confirmButtonText: 'ยืนยัน',
+            cancelButtonText: 'ยกเลิก'
+        }).then(async (result) => {
+            if (result.isConfirmed) {
+                Swal.fire({
+                    title: 'กำลังบันทึก...',
+                    text: 'กรุณารอสักครู่',
+                    allowOutsideClick: false,
+                    didOpen: () => { Swal.showLoading() }
+                });
+
+                try {
+                    const response = await fetch(`${API_URL}?api=save_hospital_report`, { method: 'POST', body: formData });
+                    const result = await response.json();
+                    
+                    if (result.status === 'success') {
+                        hospitalReportModal.classList.add('hidden');
+                        await Swal.fire({ icon: 'success', title: 'สำเร็จ!', text: result.message, timer: 1500, showConfirmButton: false });
+                        mainFetch();
+                    } else {
+                        Swal.fire('เกิดข้อผิดพลาด', result.message, 'error');
+                    }
+                } catch (error) {
+                    console.error('Error saving hospital report:', error);
+                    Swal.fire('เกิดข้อผิดพลาด', 'ไม่สามารถเชื่อมต่อเซิร์ฟเวอร์ได้', 'error');
+                }
+            }
+        });
+    });
+    
+    // Listen to radio button changes to enable Next button
+    const opRadios = document.querySelectorAll('input[name="operation_type"]');
+    opRadios.forEach(radio => {
+        radio.addEventListener('change', () => {
+            document.getElementById('nextStepBtn').disabled = false;
+        });
+    });
+
+    // --- END: Updated Hospital Report Modal Logic ---
+    
+    // History & Details Modal Functions...
     async function openHistoryModal(shelter) {
         const historyModal = document.getElementById('historyModal');
         const historyShelterName = document.getElementById('historyShelterName');
@@ -1673,7 +1787,6 @@ document.addEventListener('DOMContentLoaded', () => {
         if (dropdownToggle) {
             e.preventDefault();
             const menu = dropdownToggle.nextElementSibling;
-            // Close other dropdowns before opening the new one
             document.querySelectorAll('.manage-data-dropdown-menu').forEach(m => {
                 if (m !== menu) m.classList.add('hidden');
             });
@@ -1689,12 +1802,7 @@ document.addEventListener('DOMContentLoaded', () => {
         
         if (editBtn) {
             const shelterData = JSON.parse(editBtn.dataset.shelter);
-            shelterModalTitle.textContent = 'แก้ไขข้อมูลศูนย์';
-            shelterForm.reset();
-            Object.keys(shelterData).forEach(key => { const input = shelterForm.elements[key]; if (input) input.value = shelterData[key]; });
-            populateTambonDropdown(shelterData.amphoe, modalTambon);
-            modalTambon.value = shelterData.tambon;
-            shelterModal.classList.remove('hidden');
+            openShelterModal(shelterData);
         }
         if (deleteBtn) {
             const id = deleteBtn.dataset.id;
@@ -1716,26 +1824,44 @@ document.addEventListener('DOMContentLoaded', () => {
         const result = await submitForm(url, data);
         if (result.success) { shelterModal.classList.add('hidden'); showAlert('success', result.message); } else { showAlert('error', 'เกิดข้อผิดพลาด', result.message); }
     });
+    
+    // Hospital Report Modal Step Buttons
+    const nextStepBtn = document.getElementById('nextStepBtn');
+    if(nextStepBtn) {
+        nextStepBtn.addEventListener('click', () => {
+            document.getElementById('formStep1').classList.add('hidden');
+            document.getElementById('formStep2').classList.remove('hidden');
+        });
+    }
+
+    const prevStepBtn = document.getElementById('prevStepBtn');
+    if(prevStepBtn) {
+        prevStepBtn.addEventListener('click', () => {
+            document.getElementById('formStep2').classList.add('hidden');
+            document.getElementById('formStep1').classList.remove('hidden');
+        });
+    }
+
+    const cancelStep1Btn = document.getElementById('cancelHospitalReportModalStep1');
+    if(cancelStep1Btn) cancelStep1Btn.addEventListener('click', () => hospitalReportModal.classList.add('hidden'));
+
+
     closeUpdateAmountModalBtn.addEventListener('click', () => updateAmountModal.classList.add('hidden'));
     cancelUpdateAmountModalBtn.addEventListener('click', () => updateAmountModal.classList.add('hidden'));
     closeHospitalReportModalBtn.addEventListener('click', () => hospitalReportModal.classList.add('hidden'));
-    document.getElementById('cancelHospitalReportModal').addEventListener('click', () => hospitalReportModal.classList.add('hidden'));
     
-    // History Modal Event Listeners
-    const closeHistoryModalBtn = document.getElementById('closeHistoryModal');
-    const closeHistoryModalBtn2 = document.getElementById('closeHistoryModalBtn');
     const historyModal = document.getElementById('historyModal');
+    if(historyModal) {
+        document.getElementById('closeHistoryModal').addEventListener('click', () => historyModal.classList.add('hidden'));
+        document.getElementById('closeHistoryModalBtn').addEventListener('click', () => historyModal.classList.add('hidden'));
+    }
     
-    if (closeHistoryModalBtn) closeHistoryModalBtn.addEventListener('click', () => historyModal.classList.add('hidden'));
-    if (closeHistoryModalBtn2) closeHistoryModalBtn2.addEventListener('click', () => historyModal.classList.add('hidden'));
-    
-    // Current Details Modal Event Listeners
-    const closeCurrentDetailsModalBtn = document.getElementById('closeCurrentDetailsModal');
-    const closeCurrentDetailsModalBtn2 = document.getElementById('closeCurrentDetailsModalBtn');
     const currentDetailsModal = document.getElementById('currentDetailsModal');
-    
-    if (closeCurrentDetailsModalBtn) closeCurrentDetailsModalBtn.addEventListener('click', () => currentDetailsModal.classList.add('hidden'));
-    if (closeCurrentDetailsModalBtn2) closeCurrentDetailsModalBtn2.addEventListener('click', () => currentDetailsModal.classList.add('hidden'));
+    if(currentDetailsModal) {
+        document.getElementById('closeCurrentDetailsModal').addEventListener('click', () => currentDetailsModal.classList.add('hidden'));
+        document.getElementById('closeCurrentDetailsModalBtn').addEventListener('click', () => currentDetailsModal.classList.add('hidden'));
+    }
+
     updateAmountForm.addEventListener('submit', async (e) => {
         e.preventDefault();
         const shelterId = document.getElementById('updateShelterId').value;
@@ -1748,43 +1874,6 @@ document.addEventListener('DOMContentLoaded', () => {
         if (result.success) { updateAmountModal.classList.add('hidden'); showAlert('success', result.message); } else { showAlert('error', 'เกิดข้อผิดพลาด', result.message); }
     });
 
-    hospitalReportForm.addEventListener('submit', async (e) => {
-        e.preventDefault();
-        const formData = new FormData(e.target);
-        
-        const totalPatients = parseInt(formData.get('total_patients')) || 0;
-        const femalePatients = parseInt(formData.get('female_patients')) || 0;
-        const pregnantWomen = parseInt(formData.get('pregnant_women')) || 0;
-
-        if (pregnantWomen > femalePatients) {
-            showAlert('error', 'ข้อมูลไม่ถูกต้อง', 'จำนวนหญิงตั้งครรภ์ต้องไม่เกินจำนวนผู้ป่วยหญิงทั้งหมด');
-            return;
-        }
-
-        const subGroups = ['disabled_patients', 'bedridden_patients', 'elderly_patients', 'child_patients', 'chronic_disease_patients', 'diabetes_patients', 'hypertension_patients', 'heart_disease_patients', 'mental_health_patients', 'kidney_disease_patients', 'other_monitored_diseases'];
-        const subGroupsTotal = subGroups.reduce((sum, key) => sum + (parseInt(formData.get(key)) || 0), 0);
-
-        if (subGroupsTotal > totalPatients) {
-            showAlert('error', 'ข้อมูลไม่ถูกต้อง', `ยอดรวมในกลุ่มย่อย (${subGroupsTotal}) ต้องไม่เกินจำนวนผู้ป่วยทั้งหมด (${totalPatients})`);
-            return;
-        }
-
-        try {
-            const response = await fetch(`${API_URL}?api=save_hospital_report`, { method: 'POST', body: formData });
-            const result = await response.json();
-            
-            if (result.status === 'success') {
-                hospitalReportModal.classList.add('hidden');
-                showAlert('success', result.message);
-                mainFetch();
-            } else {
-                showAlert('error', 'เกิดข้อผิดพลาด', result.message);
-            }
-        } catch (error) {
-            console.error('Error saving hospital report:', error);
-            showAlert('error', 'เกิดข้อผิดพลาด', 'ไม่สามารถเชื่อมต่อเซิร์ฟเวอร์ได้');
-        }
-    });
     document.getElementById('getCurrentLocation').addEventListener('click', () => { if (!navigator.geolocation) return showAlert('warning', 'ไม่รองรับ'); navigator.geolocation.getCurrentPosition( pos => { shelterForm.elements.latitude.value = pos.coords.latitude.toFixed(6); shelterForm.elements.longitude.value = pos.coords.longitude.toFixed(6); }, () => showAlert('error', 'ไม่สามารถดึงพิกัดได้') ); });
 
     // --- Admin-only script initialization ---
@@ -1888,7 +1977,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const resetFilterBtn = document.getElementById('resetFilterBtn');
         const exportCsvBtn = document.getElementById('exportCsvBtn');
 
-        if(searchInput && typeFilter && amphoeFilter && tambonFilter) {
+        if(searchInput && typeFilter && amphoeFilter && tambonFilter && viewGridBtn && viewListBtn && addShelterBtn && resetFilterBtn && exportCsvBtn) {
              [searchInput, typeFilter, amphoeFilter, tambonFilter].forEach(el => el.addEventListener('input', render));
              amphoeFilter.addEventListener('change', () => { populateTambonDropdown(amphoeFilter.value, tambonFilter); render(); });
              resetFilterBtn.addEventListener('click', () => { searchInput.value = ''; typeFilter.value = ''; amphoeFilter.value = ''; populateTambonDropdown('', tambonFilter); render(); });

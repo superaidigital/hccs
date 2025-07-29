@@ -13,3 +13,7 @@
 2025-07-27 18:22:49 | Unknown column 'active' in 'where clause' | {"error_code":1054,"user_id":null,"page":null}
 2025-07-27 18:22:49 | Unknown column 'active' in 'where clause' | {"error_code":1054,"user_id":null,"page":null}
 2025-07-27 18:22:57 | Unknown column 'active' in 'where clause' | {"error_code":1054,"user_id":null,"page":null}
+2025-07-29 11:50:18 | Table 'sisaket_db.shelter_logs' doesn't exist | {"error_code":1146,"user_id":null,"page":"dashboard"}
+2025-07-29 11:57:56 | Table 'sisaket_db.shelter_logs' doesn't exist | {"error_code":1146,"user_id":null,"page":"dashboard"}
+2025-07-29 11:58:24 | Table 'sisaket_db.shelter_logs' doesn't exist | {"error_code":1146,"user_id":null,"page":"dashboard"}
+2025-07-29 11:58:25 | Table 'sisaket_db.shelter_logs' doesn't exist | {"error_code":1146,"user_id":null,"page":"dashboard"}

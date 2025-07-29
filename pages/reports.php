@@ -218,6 +218,7 @@ if (isset($_GET['api'])) {
         font-weight: bold;
         display: inline-block;
         font-size: 12px;
+        text-decoration: none; /* For <a> tags styled as buttons */
     }
     .popup-button:hover {
         background-color: #2563eb;
@@ -271,6 +272,18 @@ if (isset($_GET['api'])) {
     }
     .accordion-toggle.active .chevron-icon {
         transform: rotate(180deg);
+    }
+    .legend {
+        line-height: 18px;
+        color: #555;
+    }
+    .legend i {
+        width: 18px;
+        height: 18px;
+        float: left;
+        margin-right: 8px;
+        opacity: 0.9;
+        border: 1px solid rgba(0,0,0,0.2);
     }
 </style>
 
@@ -387,11 +400,21 @@ document.addEventListener('DOMContentLoaded', () => {
 
     const API_URL = 'index.php?page=reports';
     let map;
+    let mapLegend;
     let mapInitialized = false;
     let currentViewMode = 'card';
     let allMapShelters = [];
     let mapMarkersLayer = L.layerGroup();
     window.detailChartInstance = null; 
+
+    const typeStyles = {
+        'ศูนย์พักพิง': { color: '#3b82f6', fillColor: '#60a5fa' },
+        'ศูนย์รับบริจาค': { color: '#8b5cf6', fillColor: '#a78bfa' },
+        'รพ.สต.': { color: '#14b8a6', fillColor: '#5eead4' },
+        'โรงพยาบาล': { color: '#ec4899', fillColor: '#f9a8d4' },
+        'โรงครัวพระราชทาน': { color: '#f97316', fillColor: '#fb923c'},
+        'default': { color: '#6b7280', fillColor: '#9ca3af' }
+    };
 
     // --- Helper Functions ---
     const showLoading = (message) => {
@@ -517,6 +540,30 @@ document.addEventListener('DOMContentLoaded', () => {
     };
     
     // --- Map Functions ---
+    const addMapLegend = () => {
+        if (mapLegend) {
+            map.removeControl(mapLegend);
+        }
+        mapLegend = L.control({ position: 'bottomright' });
+
+        mapLegend.onAdd = function (map) {
+            const div = L.DomUtil.create('div', 'info legend bg-white p-3 rounded-lg shadow-lg');
+            const types = typeStyles;
+
+            div.innerHTML += '<h4 class="font-bold mb-2">ประเภทสถานที่</h4>';
+            for (let key in types) {
+                if(key !== 'default') {
+                    div.innerHTML +=
+                        '<div class="flex items-center mb-1">' +
+                        '<i class="w-4 h-4 rounded-full mr-2" style="background:' + types[key].fillColor + '; border: 1px solid ' + types[key].color + '"></i> ' +
+                        '<span>' + key + '</span></div>';
+                }
+            }
+            return div;
+        };
+        mapLegend.addTo(map);
+    };
+
     const initMap = async () => {
         if (mapInitialized) {
             map.invalidateSize();
@@ -530,6 +577,8 @@ document.addEventListener('DOMContentLoaded', () => {
             attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
         }).addTo(map);
         
+        addMapLegend();
+
         // Add fullscreen control
         L.Control.Fullscreen = L.Control.extend({
             onAdd: function(map) {
@@ -573,14 +622,6 @@ document.addEventListener('DOMContentLoaded', () => {
     
     const addMarkersToMap = (shelters) => {
         mapMarkersLayer.clearLayers();
-        const typeStyles = {
-            'ศูนย์พักพิง': { color: '#3b82f6', fillColor: '#60a5fa' },
-            'ศูนย์รับบริจาค': { color: '#8b5cf6', fillColor: '#a78bfa' },
-            'รพ.สต.': { color: '#14b8a6', fillColor: '#5eead4' },
-            'โรงพยาบาล': { color: '#ec4899', fillColor: '#f9a8d4' },
-            'โรงครัวพระราชทาน': { color: '#f97316', fillColor: '#fb923c'},
-            'default': { color: '#6b7280', fillColor: '#9ca3af' }
-        };
 
         shelters.forEach(shelter => {
             if (shelter.latitude && shelter.longitude) {
@@ -594,16 +635,16 @@ document.addEventListener('DOMContentLoaded', () => {
                 }).addTo(mapMarkersLayer);
 
                 const phoneLink = shelter.phone ? `<a href="tel:${shelter.phone}" class="popup-icon-button" title="โทร"><i data-lucide="phone" class="h-4 w-4"></i></a>` : '';
-                const navLink = `<a href="https://www.google.com/maps/dir/?api=1&destination=${shelter.latitude},${shelter.longitude}" target="_blank" class="popup-icon-button" title="นำทาง"><i data-lucide="map-trifold" class="h-4 w-4"></i></a>`;
-
+                const navLink = `<a href="https://www.google.com/maps/dir/?api=1&destination=${shelter.latitude},${shelter.longitude}" target="_blank" class="popup-icon-button" title="นำทาง"><i data-lucide="navigation" class="h-4 w-4"></i></a>`;
+                
                 const popupContent = `
                     <div class="text-base font-bold text-gray-800">${shelter.name}</div>
                     <div class="text-sm text-gray-600">ประเภท: ${shelter.type}</div>
                     <div class="text-sm text-gray-600">ยอดสะสม: ${shelter.current_occupancy}</div>
                     <div class="mt-2 flex items-center gap-2">
                         <button class="popup-button flex-grow text-center" onclick="openShelterDetailModal(${shelter.id})">ดูรายละเอียด</button>
-                        ${phoneLink}
                         ${navLink}
+                        ${phoneLink}
                     </div>
                 `;
                 marker.bindPopup(popupContent);
