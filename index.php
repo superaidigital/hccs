@@ -1,11 +1,11 @@
 <?php
-define('BASE_PATH', __DIR__); // เพิ่มบรรทัดนี้ไว้บนสุด
+define('BASE_PATH', __DIR__);
 
-// ตั้งค่า error reporting
+// Set error reporting
 ini_set('display_errors', 0);
 error_reporting(E_ALL);
 
-// เริ่ม session อย่างปลอดภัย
+// Start session securely
 if (session_status() === PHP_SESSION_NONE) {
     $session_opts = [
         'cookie_httponly' => true,
@@ -15,7 +15,27 @@ if (session_status() === PHP_SESSION_NONE) {
     session_start($session_opts);
 }
 
-// ตรวจสอบการล็อกอิน
+// --- API Request Routing ---
+// If the request is for an API, handle it here before any HTML is sent.
+if (isset($_GET['page']) && isset($_GET['api'])) {
+    $page = filter_var($_GET['page'], FILTER_SANITIZE_STRING);
+    $pageFile = __DIR__ . "/pages/{$page}.php";
+    
+    if (file_exists($pageFile)) {
+        // The page file is responsible for its own logic, including
+        // db connection, session checks, JSON output, and exiting.
+        require_once $pageFile;
+    } else {
+        header('Content-Type: application/json');
+        http_response_code(404);
+        echo json_encode(['status' => 'error', 'message' => 'API endpoint not found.']);
+    }
+    // The included page file is expected to call exit(), but we add this as a safeguard.
+    exit;
+}
+
+// --- Full Page Rendering ---
+// Redirect to login if not authenticated for a regular page view.
 if(!isset($_SESSION["loggedin"]) || $_SESSION["loggedin"] !== true){
     header("location: login.php");
     exit;
@@ -25,12 +45,11 @@ require_once "db_connect.php";
 require_once "includes/functions.php";
 
 try {
-    // ตรวจสอบการเชื่อมต่อฐานข้อมูล
     if (!$conn || $conn->connect_error) {
         throw new Exception("ไม่สามารถเชื่อมต่อฐานข้อมูลได้");
     }
 
-    // ดึงการตั้งค่าระบบ
+    // Fetch system settings
     $settings_sql = "SELECT setting_key, setting_value FROM settings";
     $settings_result = $conn->prepare($settings_sql);
     if (!$settings_result || !$settings_result->execute()) {
@@ -43,30 +62,27 @@ try {
         $settings[$row['setting_key']] = $row['setting_value'];
     }
 
-    // ตรวจสอบสถานะระบบ
+    // Check system status and user permissions
     if (($settings['system_status'] ?? '1') != '1' && $_SESSION['role'] !== 'Admin') {
         $page = 'system_disabled';
     } else {
-        // ดึงและตรวจสอบสิทธิ์การใช้งาน (FIX: Changed $_SESSION['id'] to $_SESSION['user_id'])
         $permissions = getUserPermissions($conn, $_SESSION['user_id'], $_SESSION['role']);
         if (!$permissions) {
             throw new Exception("ไม่สามารถดึงข้อมูลสิทธิ์การใช้งานได้");
         }
         $_SESSION['permissions'] = $permissions;
 
-        // ตรวจสอบและ sanitize หน้าที่เรียก
         $page = isset($_GET['page']) ? filter_var($_GET['page'], FILTER_SANITIZE_STRING) : 'dashboard';
         if (!in_array($page, $permissions['allowed_pages'])) {
-            $page = 'dashboard';
+            $page = 'dashboard'; // Default to dashboard if not allowed
         }
 
-        // ตรวจสอบไฟล์หน้าที่เรียก
         if (!file_exists("pages/{$page}.php")) {
-            throw new Exception("ไม่พบหน้าที่ต้องการ");
+            throw new Exception("ไม่พบหน้าที่ต้องการ ({$page}.php)");
         }
     }
 
-    // แสดงผลหน้าเว็บ
+    // Start rendering the page
     include 'partials/header.php';
 
     if ($page === 'system_disabled') {
@@ -79,7 +95,11 @@ try {
 
 } catch (Exception $e) {
     error_log("Error in index.php: " . $e->getMessage());
-    include 'partials/header.php';
+    
+    // To avoid "headers already sent" error, check if headers were sent before including header.
+    if (!headers_sent()) {
+        include 'partials/header.php';
+    }
     require_once 'pages/error.php';
     include 'partials/footer.php';
 }

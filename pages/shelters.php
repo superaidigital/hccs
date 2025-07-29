@@ -645,7 +645,6 @@ if (isset($_GET['api'])) {
         <p class="text-center text-gray-500 py-12 col-span-full">กำลังโหลดข้อมูล...</p>
     </div>
 </div>
-<!-- Modals and script remain the same -->
 <div id="shelterModal" class="fixed inset-0 overflow-y-auto h-full w-full justify-center items-center z-50 hidden">
     <div class="relative mx-auto p-8 border border-gray-200 w-full max-w-2xl shadow-2xl rounded-2xl bg-white">
         <button id="closeShelterModal" class="absolute top-4 right-4 text-gray-400 hover:text-gray-600"><i data-lucide="x" class="h-6 w-6"></i></button>
@@ -706,7 +705,6 @@ if (isset($_GET['api'])) {
     </div>
 </div>
 
-<!-- CSV Import Modal -->
 <div id="importModal" class="fixed inset-0 bg-black bg-opacity-60 overflow-y-auto h-full w-full justify-center items-center z-50 hidden">
     <div class="relative mx-auto p-8 border w-full max-w-lg shadow-lg rounded-2xl bg-white">
         <button id="closeImportModal" class="absolute top-4 right-4 text-gray-400 hover:text-gray-600"><i data-lucide="x" class="h-6 w-6"></i></button>
@@ -789,124 +787,120 @@ if (isset($_GET['api'])) {
     </div>
 </div>
 
-<!-- Hospital Detailed Report Modal -->
 <div id="hospitalReportModal" class="fixed inset-0 overflow-y-auto h-full w-full justify-center items-center z-50 hidden">
-    <div class="relative mx-auto p-4 border border-gray-200 w-full max-w-5xl shadow-2xl rounded-xl bg-white my-4">
-        <button id="closeHospitalReportModal" class="absolute top-3 right-3 text-gray-400 hover:text-gray-600"><i data-lucide="x" class="h-5 w-5"></i></button>
-        <h3 id="hospitalReportModalTitle" class="text-xl leading-6 font-bold text-gray-900 mb-4">รายงานรายละเอียดผู้ป่วย</h3>
-        <form id="hospitalReportForm" class="space-y-4">
+    <div class="relative mx-auto p-6 md:p-8 border-gray-200 w-full max-w-5xl shadow-2xl rounded-2xl bg-white my-8">
+        <button id="closeHospitalReportModal" class="absolute top-4 right-4 text-gray-400 hover:text-gray-600"><i data-lucide="x" class="h-6 w-6"></i></button>
+        <h3 id="hospitalReportModalTitle" class="text-2xl leading-6 font-bold text-gray-900 mb-6">รายงานรายละเอียดผู้ป่วย</h3>
+        <form id="hospitalReportForm" class="space-y-6">
             <input type="hidden" id="hospitalShelterId" name="shelter_id">
             <input type="hidden" id="hospitalReportDate" name="report_date">
             
-            <!-- เลือกการดำเนินการ -->
-            <div class="bg-gray-50 p-3 rounded-lg border-2 border-gray-200">
-                <h4 class="font-semibold text-gray-800 mb-3 text-sm">การดำเนินการ</h4>
-                <div class="flex gap-6">
-                    <label class="flex items-center">
-                        <input type="radio" name="operation_type" value="add" class="mr-2 text-green-600" checked>
-                        <span class="text-sm font-medium text-green-700">เพิ่มยอด (+)</span>
+            <div class="bg-gray-50 p-4 rounded-lg border">
+                <h4 class="font-semibold text-gray-800 mb-3">การดำเนินการ</h4>
+                <div class="flex flex-col sm:flex-row gap-4 sm:gap-6">
+                    <label class="flex items-center cursor-pointer">
+                        <input type="radio" name="operation_type" value="add" class="h-4 w-4 text-green-600 border-gray-300 focus:ring-green-500" checked>
+                        <span class="ml-2 font-medium text-green-700">เพิ่มยอด (+)</span>
                     </label>
-                    <label class="flex items-center">
-                        <input type="radio" name="operation_type" value="subtract" class="mr-2 text-red-600">
-                        <span class="text-sm font-medium text-red-700">ลดยอด (-)</span>
+                    <label class="flex items-center cursor-pointer">
+                        <input type="radio" name="operation_type" value="subtract" class="h-4 w-4 text-red-600 border-gray-300 focus:ring-red-500">
+                        <span class="ml-2 font-medium text-red-700">ลดยอด (-)</span>
                     </label>
                 </div>
-                <p class="text-sm text-gray-600 mt-2">
-                    <span class="font-medium">หมายเหตุ:</span> กรอกจำนวนที่ต้องการเพิ่มหรือลดจากยอดปัจจุบัน
+                <p class="text-xs text-gray-500 mt-2">
+                    <span class="font-medium">คำแนะนำ:</span> กรุณากรอกจำนวนที่ต้องการ "เปลี่ยนแปลง" จากยอดปัจจุบัน (ไม่ใช่ยอดรวมใหม่)
                 </p>
             </div>
             
-            <!-- ข้อมูลพื้นฐาน -->
-            <div class="bg-blue-50 p-3 rounded-lg">
-                <h4 class="font-semibold text-blue-800 mb-2 text-sm">ข้อมูลทั่วไป</h4>
-                <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
-                    <div>
-                        <label class="block text-sm font-medium text-gray-700" id="totalPatientsLabel">จำนวนที่เปลี่ยนแปลง</label>
-                        <!-- UPDATED: Added readonly and bg-gray-100 -->
-                        <input type="number" name="total_patients" id="totalPatients" min="0" value="0" class="mt-1 block w-full px-2 py-1.5 text-sm border border-gray-300 rounded-md bg-gray-100" readonly required>
-                    </div>
+            <div class="bg-blue-50 p-4 rounded-lg shadow-sm border border-blue-200">
+                <h4 class="font-semibold text-blue-800 mb-3">ข้อมูลทั่วไป</h4>
+                <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
                     <div>
                         <label class="block text-sm font-medium text-gray-700">ชาย</label>
-                        <input type="number" name="male_patients" id="malePatients" min="0" value="0" class="mt-1 block w-full px-2 py-1.5 text-sm border border-gray-300 rounded-md">
+                        <input type="number" name="male_patients" id="malePatients" min="0" value="0" class="mt-1 block w-full border-gray-300 rounded-lg shadow-sm focus:border-blue-500 focus:ring-blue-500">
                     </div>
                     <div>
                         <label class="block text-sm font-medium text-gray-700">หญิง</label>
-                        <input type="number" name="female_patients" id="femalePatients" min="0" value="0" class="mt-1 block w-full px-2 py-1.5 text-sm border border-gray-300 rounded-md">
+                        <input type="number" name="female_patients" id="femalePatients" min="0" value="0" class="mt-1 block w-full border-gray-300 rounded-lg shadow-sm focus:border-blue-500 focus:ring-blue-500">
                     </div>
                     <div>
                         <label class="block text-sm font-medium text-gray-700">หญิงตั้งครรภ์</label>
-                        <input type="number" name="pregnant_women" id="pregnantWomen" min="0" value="0" class="mt-1 block w-full px-2 py-1.5 text-sm border border-gray-300 rounded-md">
+                        <input type="number" name="pregnant_women" id="pregnantWomen" min="0" value="0" class="mt-1 block w-full border-gray-300 rounded-lg shadow-sm focus:border-blue-500 focus:ring-blue-500">
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700" id="totalPatientsLabel">จำนวนที่เปลี่ยนแปลง</label>
+                        <input type="number" name="total_patients" id="totalPatients" min="0" value="0" class="mt-1 block w-full border-gray-300 rounded-lg bg-gray-100" readonly required>
                     </div>
                 </div>
             </div>
 
-            <!-- กลุ่มผู้ป่วยพิเศษ -->
-            <div class="bg-yellow-50 p-3 rounded-lg">
-                <h4 class="font-semibold text-yellow-800 mb-2 text-sm">กลุ่มผู้ป่วยพิเศษ</h4>
-                <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
+            <div class="bg-yellow-50 p-4 rounded-lg shadow-sm border border-yellow-200">
+                <h4 class="font-semibold text-yellow-800 mb-3">กลุ่มผู้ป่วยพิเศษ</h4>
+                <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
                     <div>
                         <label class="block text-sm font-medium text-gray-700">ผู้พิการ</label>
-                        <input type="number" name="disabled_patients" id="disabledPatients" min="0" value="0" class="mt-1 block w-full px-2 py-1.5 text-sm border border-gray-300 rounded-md">
+                        <input type="number" name="disabled_patients" id="disabledPatients" min="0" value="0" class="mt-1 block w-full border-gray-300 rounded-lg shadow-sm focus:border-yellow-500 focus:ring-yellow-500">
                     </div>
                     <div>
                         <label class="block text-sm font-medium text-gray-700">ผู้ป่วยติดเตียง</label>
-                        <input type="number" name="bedridden_patients" id="bedriddenPatients" min="0" value="0" class="mt-1 block w-full px-2 py-1.5 text-sm border border-gray-300 rounded-md">
+                        <input type="number" name="bedridden_patients" id="bedriddenPatients" min="0" value="0" class="mt-1 block w-full border-gray-300 rounded-lg shadow-sm focus:border-yellow-500 focus:ring-yellow-500">
                     </div>
                     <div>
                         <label class="block text-sm font-medium text-gray-700">ผู้สูงอายุ</label>
-                        <input type="number" name="elderly_patients" id="elderlyPatients" min="0" value="0" class="mt-1 block w-full px-2 py-1.5 text-sm border border-gray-300 rounded-md">
+                        <input type="number" name="elderly_patients" id="elderlyPatients" min="0" value="0" class="mt-1 block w-full border-gray-300 rounded-lg shadow-sm focus:border-yellow-500 focus:ring-yellow-500">
                     </div>
                     <div>
                         <label class="block text-sm font-medium text-gray-700">เด็ก</label>
-                        <input type="number" name="child_patients" id="childPatients" min="0" value="0" class="mt-1 block w-full px-2 py-1.5 text-sm border border-gray-300 rounded-md">
+                        <input type="number" name="child_patients" id="childPatients" min="0" value="0" class="mt-1 block w-full border-gray-300 rounded-lg shadow-sm focus:border-yellow-500 focus:ring-yellow-500">
                     </div>
                 </div>
             </div>
 
-            <!-- โรคเรื้อรัง -->
-            <div class="bg-red-50 p-3 rounded-lg">
-                <h4 class="font-semibold text-red-800 mb-2 text-sm">โรคเรื้อรังและโรคที่ต้องเฝ้าระวัง</h4>
-                <div class="grid grid-cols-2 md:grid-cols-3 gap-3">
+            <div class="bg-pink-50 p-4 rounded-lg shadow-sm border border-pink-200">
+                <h4 class="font-semibold text-pink-800 mb-3">โรคเรื้อรังและโรคที่ต้องเฝ้าระวัง</h4>
+                <div class="grid grid-cols-2 md:grid-cols-3 gap-4">
                     <div>
                         <label class="block text-sm font-medium text-gray-700">ผู้ป่วยโรคเรื้อรัง</label>
-                        <input type="number" name="chronic_disease_patients" id="chronicDiseasePatients" min="0" value="0" class="mt-1 block w-full px-2 py-1.5 text-sm border border-gray-300 rounded-md">
+                        <input type="number" name="chronic_disease_patients" id="chronicDiseasePatients" min="0" value="0" class="mt-1 block w-full border-gray-300 rounded-lg shadow-sm focus:border-pink-500 focus:ring-pink-500">
                     </div>
                     <div>
                         <label class="block text-sm font-medium text-gray-700">โรคเบาหวาน</label>
-                        <input type="number" name="diabetes_patients" id="diabetesPatients" min="0" value="0" class="mt-1 block w-full px-2 py-1.5 text-sm border border-gray-300 rounded-md">
+                        <input type="number" name="diabetes_patients" id="diabetesPatients" min="0" value="0" class="mt-1 block w-full border-gray-300 rounded-lg shadow-sm focus:border-pink-500 focus:ring-pink-500">
                     </div>
                     <div>
                         <label class="block text-sm font-medium text-gray-700">โรคความดันโลหิตสูง</label>
-                        <input type="number" name="hypertension_patients" id="hypertensionPatients" min="0" value="0" class="mt-1 block w-full px-2 py-1.5 text-sm border border-gray-300 rounded-md">
+                        <input type="number" name="hypertension_patients" id="hypertensionPatients" min="0" value="0" class="mt-1 block w-full border-gray-300 rounded-lg shadow-sm focus:border-pink-500 focus:ring-pink-500">
                     </div>
                     <div>
                         <label class="block text-sm font-medium text-gray-700">โรคหัวใจ</label>
-                        <input type="number" name="heart_disease_patients" id="heartDiseasePatients" min="0" value="0" class="mt-1 block w-full px-2 py-1.5 text-sm border border-gray-300 rounded-md">
+                        <input type="number" name="heart_disease_patients" id="heartDiseasePatients" min="0" value="0" class="mt-1 block w-full border-gray-300 rounded-lg shadow-sm focus:border-pink-500 focus:ring-pink-500">
                     </div>
                     <div>
                         <label class="block text-sm font-medium text-gray-700">จิตเวช</label>
-                        <input type="number" name="mental_health_patients" id="mentalHealthPatients" min="0" value="0" class="mt-1 block w-full px-2 py-1.5 text-sm border border-gray-300 rounded-md">
+                        <input type="number" name="mental_health_patients" id="mentalHealthPatients" min="0" value="0" class="mt-1 block w-full border-gray-300 rounded-lg shadow-sm focus:border-pink-500 focus:ring-pink-500">
                     </div>
                     <div>
                         <label class="block text-sm font-medium text-gray-700">ไตวายระยะฟอกไต</label>
-                        <input type="number" name="kidney_disease_patients" id="kidneyDiseasePatients" min="0" value="0" class="mt-1 block w-full px-2 py-1.5 text-sm border border-gray-300 rounded-md">
+                        <input type="number" name="kidney_disease_patients" id="kidneyDiseasePatients" min="0" value="0" class="mt-1 block w-full border-gray-300 rounded-lg shadow-sm focus:border-pink-500 focus:ring-pink-500">
                     </div>
                     <div class="md:col-span-3">
                         <label class="block text-sm font-medium text-gray-700">โรคที่ต้องเฝ้าระวังอื่นๆ</label>
-                        <input type="number" name="other_monitored_diseases" id="otherMonitoredDiseases" min="0" value="0" class="mt-1 block w-full px-2 py-1.5 text-sm border border-gray-300 rounded-md">
+                        <input type="number" name="other_monitored_diseases" id="otherMonitoredDiseases" min="0" value="0" class="mt-1 block w-full border-gray-300 rounded-lg shadow-sm focus:border-pink-500 focus:ring-pink-500">
                     </div>
                 </div>
             </div>
 
-            <div class="flex justify-end gap-3 pt-3 border-t">
-                <button type="button" id="cancelHospitalReportModal" class="px-4 py-2 bg-gray-200 text-sm rounded-lg hover:bg-gray-300">ยกเลิก</button>
-                <button type="submit" class="px-4 py-2 bg-blue-600 text-white text-sm font-bold rounded-lg">บันทึกข้อมูล</button>
+            <div class="flex justify-end gap-4 pt-4 border-t border-gray-200">
+                <button type="button" id="cancelHospitalReportModal" class="px-6 py-2.5 bg-gray-200 text-gray-800 rounded-lg hover:bg-gray-300 font-medium">ยกเลิก</button>
+                <button type="submit" class="px-6 py-2.5 bg-blue-600 text-white font-bold rounded-lg hover:bg-blue-700 flex items-center gap-2">
+                    <i data-lucide="save" class="h-5 w-5"></i>
+                    <span>บันทึกข้อมูล</span>
+                </button>
             </div>
         </form>
     </div>
 </div>
 
-<!-- History Modal -->
 <div id="historyModal" class="fixed inset-0 overflow-y-auto h-full w-full justify-center items-center z-50 hidden">
     <div class="relative mx-auto p-3 border border-gray-200 w-full max-w-6xl shadow-2xl rounded-xl bg-white my-2">
         <button id="closeHistoryModal" class="absolute top-2 right-2 text-gray-400 hover:text-gray-600">
@@ -954,12 +948,10 @@ if (isset($_GET['api'])) {
                         </tr>
                     </thead>
                     <tbody id="historyTableBody" class="bg-white divide-y divide-gray-200">
-                        <!-- History data will be loaded here -->
-                    </tbody>
+                        </tbody>
                 </table>
             </div>
             
-            <!-- Pagination Controls -->
             <div id="historyPagination" class="flex items-center justify-between bg-white px-3 py-2 border-t border-gray-200 sm:px-4 hidden">
                 <div class="flex-1 flex justify-between sm:hidden">
                     <button id="historyPrevMobile" class="relative inline-flex items-center px-3 py-1.5 border border-gray-300 text-sm font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed">
@@ -977,8 +969,7 @@ if (isset($_GET['api'])) {
                     </div>
                     <div>
                         <nav class="relative z-0 inline-flex rounded-md shadow-sm -space-x-px" id="historyPageNumbers">
-                            <!-- Page numbers will be generated here -->
-                        </nav>
+                            </nav>
                     </div>
                 </div>
             </div>
@@ -995,7 +986,6 @@ if (isset($_GET['api'])) {
     </div>
 </div>
 
-<!-- Current Details Modal -->
 <div id="currentDetailsModal" class="fixed inset-0 overflow-y-auto h-full w-full justify-center items-center z-50 hidden">
     <div class="relative mx-auto p-3 border border-gray-200 w-full max-w-4xl shadow-2xl rounded-xl bg-white my-2">
         <button id="closeCurrentDetailsModal" class="absolute top-2 right-2 text-gray-400 hover:text-gray-600">
@@ -1019,7 +1009,6 @@ if (isset($_GET['api'])) {
         </div>
         
         <div id="currentDetailsContent" class="hidden">
-            <!-- Summary Section -->
             <div class="bg-blue-50 p-3 rounded-lg mb-3">
                 <h4 class="font-semibold text-blue-800 mb-2 text-sm">ข้อมูลสรุป</h4>
                 <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
@@ -1042,7 +1031,6 @@ if (isset($_GET['api'])) {
                 </div>
             </div>
             
-            <!-- Special Groups Section -->
             <div class="bg-yellow-50 p-3 rounded-lg mb-3">
                 <h4 class="font-semibold text-yellow-800 mb-2 text-sm">กลุ่มผู้ป่วย/ผู้เข้าพักพิเศษ</h4>
                 <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
@@ -1065,7 +1053,6 @@ if (isset($_GET['api'])) {
                 </div>
             </div>
             
-            <!-- Chronic Diseases Section -->
             <div class="bg-red-50 p-3 rounded-lg mb-3">
                 <h4 class="font-semibold text-red-800 mb-2 text-sm">โรคเรื้อรังและโรคที่ต้องเฝ้าระวัง</h4>
                 <div class="grid grid-cols-2 md:grid-cols-3 gap-3">
@@ -1100,7 +1087,6 @@ if (isset($_GET['api'])) {
                 </div>
             </div>
             
-            <!-- Report Info Section -->
             <div class="bg-gray-50 p-3 rounded-lg">
                 <h4 class="font-semibold text-gray-800 mb-1 text-sm">ข้อมูลรายงาน</h4>
                 <div class="text-sm text-gray-600">

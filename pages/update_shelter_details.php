@@ -151,9 +151,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 ?>
 
 <div class="space-y-6">
-    <!-- Page Header -->
     <div class="flex items-center gap-4">
-        <a href="index.php?page=shelters" class="p-2 bg-gray-200 rounded-lg text-gray-600 hover:bg-gray-300" title="กลับไปหน้ารายการ">
+        <a href="index.php?page=shelters" class="p-2 bg-gray-200 rounded-lg text-gray-600 hover:bg-gray-300 transition-colors" title="กลับไปหน้ารายการ">
             <i data-lucide="arrow-left" class="h-6 w-6"></i>
         </a>
         <div>
@@ -163,85 +162,80 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     </div>
 
     <?php if ($error_message): ?>
-        <div class="bg-red-100 border-l-4 border-red-500 text-red-700 p-4" role="alert">
+        <div class="bg-red-100 border-l-4 border-red-500 text-red-700 p-4 rounded-md" role="alert">
             <p class="font-bold">เกิดข้อผิดพลาด</p>
             <p><?= htmlspecialchars($error_message) ?></p>
         </div>
     <?php endif; ?>
 
-    <!-- Form Section -->
-    <div class="bg-white p-6 md:p-8 rounded-xl shadow-lg">
+    <div class="bg-white p-6 md:p-8 rounded-2xl shadow-lg">
         <form id="hospitalReportForm" method="POST" action="index.php?page=update_shelter_details&shelter_id=<?= $shelter_id ?>" class="space-y-6">
             <input type="hidden" name="report_date" value="<?= date('Y-m-d') ?>">
             
-            <!-- Operation Type -->
             <div class="bg-gray-50 p-4 rounded-lg border">
                 <h4 class="font-semibold text-gray-800 mb-3">การดำเนินการ</h4>
-                <div class="flex gap-6">
+                <div class="flex flex-col sm:flex-row gap-4 sm:gap-6">
                     <label class="flex items-center cursor-pointer">
-                        <input type="radio" name="operation_type" value="add" class="h-4 w-4 text-green-600 border-gray-300" checked>
+                        <input type="radio" name="operation_type" value="add" class="h-4 w-4 text-green-600 border-gray-300 focus:ring-green-500" checked>
                         <span class="ml-2 font-medium text-green-700">เพิ่มยอด (+)</span>
                     </label>
                     <label class="flex items-center cursor-pointer">
-                        <input type="radio" name="operation_type" value="subtract" class="h-4 w-4 text-red-600 border-gray-300">
+                        <input type="radio" name="operation_type" value="subtract" class="h-4 w-4 text-red-600 border-gray-300 focus:ring-red-500">
                         <span class="ml-2 font-medium text-red-700">ลดยอด (-)</span>
                     </label>
                 </div>
+                 <p class="text-xs text-gray-500 mt-2">
+                    <span class="font-medium">คำแนะนำ:</span> กรุณากรอกจำนวนที่ต้องการ "เปลี่ยนแปลง" จากยอดปัจจุบัน (ไม่ใช่ยอดรวมใหม่)
+                </p>
             </div>
             
-            <!-- General Info -->
-            <div class="bg-blue-50 p-4 rounded-lg">
-                <h4 class="font-semibold text-blue-800 mb-2">ข้อมูลทั่วไป</h4>
+            <div class="bg-blue-50 p-4 rounded-lg shadow-sm border border-blue-200">
+                <h4 class="font-semibold text-blue-800 mb-3">ข้อมูลทั่วไป</h4>
                 <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
                     <div>
                         <label class="block text-sm font-medium text-gray-700">ชาย</label>
-                        <input type="number" name="male_patients" id="malePatients" min="0" value="0" class="mt-1 block w-full border-gray-300 rounded-md shadow-sm">
+                        <input type="number" name="male_patients" id="malePatients" min="0" value="0" class="mt-1 block w-full border-gray-300 rounded-lg shadow-sm focus:border-blue-500 focus:ring-blue-500">
                     </div>
                     <div>
                         <label class="block text-sm font-medium text-gray-700">หญิง</label>
-                        <input type="number" name="female_patients" id="femalePatients" min="0" value="0" class="mt-1 block w-full border-gray-300 rounded-md shadow-sm">
+                        <input type="number" name="female_patients" id="femalePatients" min="0" value="0" class="mt-1 block w-full border-gray-300 rounded-lg shadow-sm focus:border-blue-500 focus:ring-blue-500">
                     </div>
                     <div>
                         <label class="block text-sm font-medium text-gray-700">หญิงตั้งครรภ์</label>
-                        <input type="number" name="pregnant_women" min="0" value="0" class="mt-1 block w-full border-gray-300 rounded-md shadow-sm">
+                        <input type="number" name="pregnant_women" min="0" value="0" class="mt-1 block w-full border-gray-300 rounded-lg shadow-sm focus:border-blue-500 focus:ring-blue-500">
                     </div>
                      <div>
-                        <label class="block text-sm font-medium text-gray-700">จำนวนรวม (อัตโนมัติ)</label>
-                        <input type="number" name="total_patients" id="totalPatients" class="mt-1 block w-full bg-gray-100 border-gray-300 rounded-md shadow-sm" readonly>
+                        <label class="block text-sm font-medium text-gray-700">รวม (อัตโนมัติ)</label>
+                        <input type="number" name="total_patients" id="totalPatients" class="mt-1 block w-full bg-gray-100 border-gray-300 rounded-lg shadow-sm" readonly>
                     </div>
                 </div>
             </div>
 
-            <!-- Special Groups -->
-            <div class="bg-yellow-50 p-4 rounded-lg">
-                <h4 class="font-semibold text-yellow-800 mb-2">กลุ่มผู้ป่วยพิเศษ</h4>
+            <div class="bg-yellow-50 p-4 rounded-lg shadow-sm border border-yellow-200">
+                <h4 class="font-semibold text-yellow-800 mb-3">กลุ่มผู้ป่วยพิเศษ</h4>
                 <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
-                    <!-- Fields here -->
-                    <div><label class="block text-sm font-medium text-gray-700">ผู้พิการ</label><input type="number" name="disabled_patients" min="0" value="0" class="mt-1 block w-full border-gray-300 rounded-md shadow-sm"></div>
-                    <div><label class="block text-sm font-medium text-gray-700">ผู้ป่วยติดเตียง</label><input type="number" name="bedridden_patients" min="0" value="0" class="mt-1 block w-full border-gray-300 rounded-md shadow-sm"></div>
-                    <div><label class="block text-sm font-medium text-gray-700">ผู้สูงอายุ</label><input type="number" name="elderly_patients" min="0" value="0" class="mt-1 block w-full border-gray-300 rounded-md shadow-sm"></div>
-                    <div><label class="block text-sm font-medium text-gray-700">เด็ก</label><input type="number" name="child_patients" min="0" value="0" class="mt-1 block w-full border-gray-300 rounded-md shadow-sm"></div>
+                    <div><label class="block text-sm font-medium text-gray-700">ผู้พิการ</label><input type="number" name="disabled_patients" min="0" value="0" class="mt-1 block w-full border-gray-300 rounded-lg shadow-sm focus:border-yellow-500 focus:ring-yellow-500"></div>
+                    <div><label class="block text-sm font-medium text-gray-700">ผู้ป่วยติดเตียง</label><input type="number" name="bedridden_patients" min="0" value="0" class="mt-1 block w-full border-gray-300 rounded-lg shadow-sm focus:border-yellow-500 focus:ring-yellow-500"></div>
+                    <div><label class="block text-sm font-medium text-gray-700">ผู้สูงอายุ</label><input type="number" name="elderly_patients" min="0" value="0" class="mt-1 block w-full border-gray-300 rounded-lg shadow-sm focus:border-yellow-500 focus:ring-yellow-500"></div>
+                    <div><label class="block text-sm font-medium text-gray-700">เด็ก</label><input type="number" name="child_patients" min="0" value="0" class="mt-1 block w-full border-gray-300 rounded-lg shadow-sm focus:border-yellow-500 focus:ring-yellow-500"></div>
                 </div>
             </div>
 
-            <!-- Chronic Diseases -->
-            <div class="bg-red-50 p-4 rounded-lg">
-                <h4 class="font-semibold text-red-800 mb-2">โรคเรื้อรังและโรคที่ต้องเฝ้าระวัง</h4>
+            <div class="bg-pink-50 p-4 rounded-lg shadow-sm border border-pink-200">
+                <h4 class="font-semibold text-pink-800 mb-3">โรคเรื้อรังและโรคที่ต้องเฝ้าระวัง</h4>
                 <div class="grid grid-cols-2 md:grid-cols-3 gap-4">
-                    <!-- Fields here -->
-                     <div><label class="block text-sm font-medium text-gray-700">ผู้ป่วยโรคเรื้อรัง</label><input type="number" name="chronic_disease_patients" min="0" value="0" class="mt-1 block w-full border-gray-300 rounded-md shadow-sm"></div>
-                     <div><label class="block text-sm font-medium text-gray-700">โรคเบาหวาน</label><input type="number" name="diabetes_patients" min="0" value="0" class="mt-1 block w-full border-gray-300 rounded-md shadow-sm"></div>
-                     <div><label class="block text-sm font-medium text-gray-700">ความดันโลหิตสูง</label><input type="number" name="hypertension_patients" min="0" value="0" class="mt-1 block w-full border-gray-300 rounded-md shadow-sm"></div>
-                     <div><label class="block text-sm font-medium text-gray-700">โรคหัวใจ</label><input type="number" name="heart_disease_patients" min="0" value="0" class="mt-1 block w-full border-gray-300 rounded-md shadow-sm"></div>
-                     <div><label class="block text-sm font-medium text-gray-700">จิตเวช</label><input type="number" name="mental_health_patients" min="0" value="0" class="mt-1 block w-full border-gray-300 rounded-md shadow-sm"></div>
-                     <div><label class="block text-sm font-medium text-gray-700">ไตวาย (ฟอกไต)</label><input type="number" name="kidney_disease_patients" min="0" value="0" class="mt-1 block w-full border-gray-300 rounded-md shadow-sm"></div>
-                     <div class="md:col-span-3"><label class="block text-sm font-medium text-gray-700">โรคเฝ้าระวังอื่นๆ</label><input type="number" name="other_monitored_diseases" min="0" value="0" class="mt-1 block w-full border-gray-300 rounded-md shadow-sm"></div>
+                     <div><label class="block text-sm font-medium text-gray-700">ผู้ป่วยโรคเรื้อรัง</label><input type="number" name="chronic_disease_patients" min="0" value="0" class="mt-1 block w-full border-gray-300 rounded-lg shadow-sm focus:border-pink-500 focus:ring-pink-500"></div>
+                     <div><label class="block text-sm font-medium text-gray-700">โรคเบาหวาน</label><input type="number" name="diabetes_patients" min="0" value="0" class="mt-1 block w-full border-gray-300 rounded-lg shadow-sm focus:border-pink-500 focus:ring-pink-500"></div>
+                     <div><label class="block text-sm font-medium text-gray-700">ความดันโลหิตสูง</label><input type="number" name="hypertension_patients" min="0" value="0" class="mt-1 block w-full border-gray-300 rounded-lg shadow-sm focus:border-pink-500 focus:ring-pink-500"></div>
+                     <div><label class="block text-sm font-medium text-gray-700">โรคหัวใจ</label><input type="number" name="heart_disease_patients" min="0" value="0" class="mt-1 block w-full border-gray-300 rounded-lg shadow-sm focus:border-pink-500 focus:ring-pink-500"></div>
+                     <div><label class="block text-sm font-medium text-gray-700">จิตเวช</label><input type="number" name="mental_health_patients" min="0" value="0" class="mt-1 block w-full border-gray-300 rounded-lg shadow-sm focus:border-pink-500 focus:ring-pink-500"></div>
+                     <div><label class="block text-sm font-medium text-gray-700">ไตวาย (ฟอกไต)</label><input type="number" name="kidney_disease_patients" min="0" value="0" class="mt-1 block w-full border-gray-300 rounded-lg shadow-sm focus:border-pink-500 focus:ring-pink-500"></div>
+                     <div class="md:col-span-3"><label class="block text-sm font-medium text-gray-700">โรคเฝ้าระวังอื่นๆ</label><input type="number" name="other_monitored_diseases" min="0" value="0" class="mt-1 block w-full border-gray-300 rounded-lg shadow-sm focus:border-pink-500 focus:ring-pink-500"></div>
                 </div>
             </div>
 
-            <!-- Submission Buttons -->
-            <div class="mt-6 pt-5 border-t flex justify-end gap-3">
-                 <a href="index.php?page=shelters" class="px-6 py-2.5 bg-gray-200 text-gray-800 rounded-lg hover:bg-gray-300">ยกเลิก</a>
+            <div class="mt-6 pt-6 border-t flex justify-end gap-4">
+                 <a href="index.php?page=shelters" class="px-6 py-2.5 bg-gray-200 text-gray-800 rounded-lg hover:bg-gray-300 font-medium">ยกเลิก</a>
                  <button type="submit" class="px-6 py-2.5 bg-blue-600 text-white font-bold rounded-lg hover:bg-blue-700 flex items-center gap-2">
                     <i data-lucide="save" class="h-5 w-5"></i>
                     <span>บันทึกข้อมูล</span>
@@ -313,4 +307,3 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 });
 </script>
-
